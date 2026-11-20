@@ -807,7 +807,7 @@
 
   /* ---------- live scanner ---------- */
   let stream = null, scanning = false, loopT = null, busy = false, detector = null, zxReader = null, zxHints = null;
-  let sessionId = null, sessionVals = new Map(), lastVal = '', lastSeen = 0, cand = '', candN = 0, sessionCount = 0, resumeLater = false, torchOn = false, audioCtx = null;
+  let sessionId = null, sessionVals = new Map(), lastVal = '', scanSig = null, cleared = true, clearStart = 0, lastSeen = 0, cand = '', candN = 0, sessionCount = 0, resumeLater = false, torchOn = false, audioCtx = null;
   const setMsg = t => { $('#scanMsg').textContent = t; };
 
   function soundReady(){ return !!audioCtx && audioCtx.state === 'running'; }
@@ -852,7 +852,7 @@
 
   async function startScanner(){
     if (scanning) return;
-    if (!sessionId) { sessionId = Date.now(); sessionVals = new Map(); lastVal = ''; }
+    if (!sessionId) { sessionId = Date.now(); sessionVals = new Map(); lastVal = ''; scanSig = null; cleared = true; clearStart = 0; }
     $('#scan').hidden = false; document.body.classList.add('lock');
     $('#scanCount').textContent = sessionCount + ' saved';
     setMsg('Starting camera…');
@@ -944,22 +944,52 @@
     const v = $('#vid');
     if (v.readyState >= 2 && !busy) {
       busy = true;
-      try { const r = await detectFrame(v); if (r) onCode(r, v); else candN = 0; } catch(e){}
+      try { const r = await detectFrame(v); trackScene(v, r); if (r) onCode(r, v); else candN = 0; } catch(e){}
       busy = false;
     }
     loopT = setTimeout(loop, 150);
   }
-  // The same barcode counts again once it has been out of view for this long
-  const REAPPEAR_MS = 800;
+  /* "Is the product gone?" — a tiny greyscale picture of the view is kept from the
+     moment of each scan. The same barcode only counts again after the whole view has
+     changed a lot from that picture (product taken away) and stayed changed for a moment. */
+  const SIG_W = 32, SIG_H = 24;
+  const SCENE_DIFF = 0.55;   // 0 = identical view, ~1.1 = completely different view
+  const CLEAR_MS = 350;      // how long the view must stay changed
+  const sigCanvas = document.createElement('canvas'); sigCanvas.width = SIG_W; sigCanvas.height = SIG_H;
+  const sigCtx = sigCanvas.getContext('2d', {willReadFrequently: true});
+  function sceneSig(v){
+    sigCtx.drawImage(v, 0, 0, SIG_W, SIG_H);
+    const d = sigCtx.getImageData(0, 0, SIG_W, SIG_H).data, n = SIG_W * SIG_H, g = new Float32Array(n);
+    let sum = 0;
+    for (let i = 0; i < n; i++) { g[i] = d[i*4] * 0.3 + d[i*4+1] * 0.59 + d[i*4+2] * 0.11; sum += g[i]; }
+    const mean = sum / n; let sq = 0;
+    for (let i = 0; i < n; i++) { g[i] -= mean; sq += g[i] * g[i]; }
+    const sd = Math.sqrt(sq / n) || 1;
+    for (let i = 0; i < n; i++) g[i] /= sd;   // ignores the camera brightening or darkening
+    return g;
+  }
+  function sigDiff(a, b){ let t = 0; for (let i = 0; i < a.length; i++) t += Math.abs(a[i] - b[i]); return t / a.length; }
+  function trackScene(v, r){
+    if (cleared || !scanSig) return;
+    if (r && r.value === lastVal) { clearStart = 0; return; }     // the product is still there
+    let d = 0;
+    try { d = sigDiff(sceneSig(v), scanSig); } catch(e){ return; }
+    if (d < SCENE_DIFF) { clearStart = 0; return; }
+    const now = Date.now();
+    if (!clearStart) clearStart = now;
+    else if (now - clearStart >= CLEAR_MS) { cleared = true; setMsg('Ready for the next item'); }
+  }
+
   function onCode(r, v){
     const now = Date.now();
-    // still the same barcode being held in view: not a new scan
-    if (r.value === lastVal && now - lastSeen < REAPPEAR_MS) { lastSeen = now; return; }
+    // the same product hasn't left the view yet: not a new scan
+    if (r.value === lastVal && !cleared) return;
     if (!detector) {           // the fallback reader can misread, so need the same result twice
       if (r.value === cand) candN++; else { cand = r.value; candN = 1; }
       if (candN < 2) return;
     }
     lastVal = r.value; lastSeen = now;
+    try { scanSig = sceneSig(v); cleared = false; clearStart = 0; } catch(e){ scanSig = null; cleared = true; }
     const n = (sessionVals.get(r.value) || 0) + 1;
     sessionVals.set(r.value, n);
     let photo = null;

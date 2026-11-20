@@ -182,6 +182,8 @@
   #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(20px);background:var(--ink);color:#fff;padding:11px 18px;border-radius:12px;font-size:14px;font-weight:500;opacity:0;pointer-events:none;transition:.2s;z-index:40;max-width:90vw;text-align:center}
   #toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
   #toast.act{pointer-events:auto}
+  #studyBar{position:fixed;left:50%;transform:translateX(-50%);bottom:84px;background:#1a1814;color:#fff;font-size:13px;font-weight:500;padding:9px 14px;border-radius:12px;z-index:19;max-width:92vw;text-align:center;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+  #studyBar[hidden]{display:none}
   .toast-btn{background:none;border:0;color:#ffb38f;font-weight:700;font-size:14px;margin-left:12px;padding:2px 4px}
   .btn.half{grid-column:auto}
   .card-row{display:flex;gap:8px;align-items:stretch}
@@ -1026,7 +1028,7 @@
 
   async function startScanner(){
     if (scanning) return;
-    if (!sessionId) { sessionId = Date.now(); sessionVals = new Map(); lastVal = ''; scanSig = null; cleared = true; clearStart = 0; }
+    if (!sessionId) { sessionId = Date.now(); sessionVals = new Map(); lastVal = ''; scanSig = null; cleared = true; clearStart = 0; resetVideo(); }
     $('#scan').hidden = false; document.body.classList.add('lock');
     $('#scanCount').textContent = sessionCount + ' saved';
     setMsg('Starting camera…');
@@ -1053,19 +1055,49 @@
     updateReaderTag();
     scanning = true; cand = ''; candN = 0;
     clearInterval(sceneT); sceneT = setInterval(sceneTick, 40);
+    startSegment();
     clearInterval(ocrT); ocrT = setInterval(ocrTick, 250); ocrPrev = '';
     setMsg('Point at a barcode');
     updateSoundChip();
     loop();
   }
+  /* ---------- recording the scanning round ----------
+     The camera feed is recorded to memory only (never saved to the phone). A new piece starts
+     whenever the camera restarts or the lens changes. After Done, the video is studied for
+     better views of each product and then thrown away. */
+  let rec = null, recChunks = [], recStart = 0, recBytes = 0, recEnding = Promise.resolve();
+  let videoSegs = [], videoMarks = [];
+  const REC_MAX_BYTES = 250e6;
+  function startSegment(){
+    if (rec || !stream || !window.MediaRecorder || recBytes > REC_MAX_BYTES) return;
+    const types = ['video/mp4;codecs=avc1', 'video/mp4', 'video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+    const mime = types.find(t => { try { return MediaRecorder.isTypeSupported(t); } catch(e){ return false; } }) || '';
+    try { rec = new MediaRecorder(stream, mime ? {mimeType: mime, videoBitsPerSecond: 3e6} : {videoBitsPerSecond: 3e6}); }
+    catch(e){ rec = null; return; }
+    recChunks = [];
+    rec.ondataavailable = e => { if (e.data && e.data.size) { recChunks.push(e.data); recBytes += e.data.size; if (recBytes > REC_MAX_BYTES) endSegment(); } };
+    try { rec.start(1000); recStart = performance.now(); } catch(e){ rec = null; }
+  }
+  function endSegment(){
+    if (!rec) return recEnding;
+    const r = rec, chunks = recChunks, start = recStart, type = r.mimeType || 'video/webm';
+    rec = null;
+    recEnding = new Promise(res => {
+      r.onstop = () => { if (chunks.length) videoSegs.push({blob: new Blob(chunks, {type: type}), start: start, end: performance.now()}); res(); };
+      try { r.stop(); } catch(e){ res(); }
+    });
+    return recEnding;
+  }
+  function resetVideo(){ videoSegs = []; videoMarks = []; recBytes = 0; }
   // carry on an earlier scan: new barcodes go into that folder, repeats keep counting (2), (3)…
   function resumeSession(f){
-    sessionId = f.id; sessionResumed = true;
+    sessionId = f.id; sessionResumed = true; resetVideo();
     sessionVals = new Map();
     f.items.forEach(it => sessionVals.set(it.value, (sessionVals.get(it.value) || 0) + 1));
     lastVal = ''; scanSig = null; cleared = true; clearStart = 0;
   }
   function stopTracks(){
+    endSegment();
     scanning = false; clearTimeout(loopT); clearInterval(sceneT); clearInterval(ocrT);
     try { boxCv.getContext('2d').clearRect(0, 0, boxCv.width, boxCv.height); } catch(e){}
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
@@ -1073,6 +1105,10 @@
   }
   function stopScanner(){
     stopTracks();
+    const segs = videoSegs, marks = videoMarks;
+    videoSegs = []; videoMarks = [];
+    if (marks.length) recEnding.then(() => studyVideo(segs.concat(videoSegs.splice(0)), marks));
+    else segs.length = 0;
     $('#scan').hidden = true;
     if ($('#show').hidden && $('#backdrop').hidden) document.body.classList.remove('lock');
     const sid = sessionId, n = sessionCount, added = sessionResumed;
@@ -1164,12 +1200,15 @@
     const lens = lenses[i]; if (!lens) return;
     const cur = curDevice();
     if (lens.deviceId && cur && lens.deviceId !== cur) {
+      const wasRecording = !!rec;
+      endSegment();
       stream.getTracks().forEach(t => t.stop());
       try { stream = await getStream(lens.deviceId); }
       catch(e){ stream = await getStream(cur); }
       const v = $('#vid'); v.srcObject = stream;
       try { await v.play(); } catch(e){}
       setupTorch();
+      if (wasRecording) startSegment();
     }
     const t = stream.getVideoTracks()[0];
     try {
@@ -1711,13 +1750,109 @@
     const heb = raw.filter(t => /[\u05D0-\u05EA]{2,}/.test(t)).length;
     return {guess: guess, price: findPrice(data.text), size: findSize(data.text), text: words.slice(0, 12).map(w => w.t).join(' '), raw: raw, heb: heb};
   }
+  /* ----- studying the recorded video ("look again and again") -----
+     Pass 1: the moments around each scan. Pass 2 (products still not identified): a wider
+     window, preferring views without the barcode (the front of the product). Pass 3: the whole
+     video, each moment given to the nearest scan. Each pass keeps the sharpest frames and feeds
+     them to the same reading as live scanning, adding to what is already known. */
+  function sharpness(c){
+    const w = 160, h = Math.max(1, Math.round(c.height * 160 / c.width));
+    const t = document.createElement('canvas'); t.width = w; t.height = h;
+    const x = t.getContext('2d', {willReadFrequently: true}); x.drawImage(c, 0, 0, w, h);
+    const d = x.getImageData(0, 0, w, h).data, g = new Float32Array(w * h);
+    for (let i = 0; i < g.length; i++) g[i] = d[i*4] * 0.3 + d[i*4+1] * 0.59 + d[i*4+2] * 0.11;
+    let sum = 0, sq = 0, n = 0;
+    for (let y = 1; y < h - 1; y++) for (let xx = 1; xx < w - 1; xx++) {
+      const i = y * w + xx, l = 4 * g[i] - g[i-1] - g[i+1] - g[i-w] - g[i+w];
+      sum += l; sq += l * l; n++;
+    }
+    return n ? sq / n - (sum / n) * (sum / n) : 0;
+  }
+  function seekTo(v, t){
+    return new Promise(res => {
+      const done = () => { v.removeEventListener('seeked', done); clearTimeout(tm); res(); };
+      const tm = setTimeout(done, 4000);
+      v.addEventListener('seeked', done);
+      v.currentTime = Math.max(0, Math.min(t, (v.duration || t) - 0.05));
+    });
+  }
+  async function openVideo(blob){
+    const v = document.createElement('video');
+    v.muted = true; v.playsInline = true; v.preload = 'auto';
+    const url = URL.createObjectURL(blob);
+    v.src = url;
+    await new Promise(res => { v.onloadedmetadata = res; v.onerror = res; setTimeout(res, 8000); });
+    if (!isFinite(v.duration)) {   // some recordings don't say how long they are until the end is read
+      v.currentTime = 1e9;
+      await new Promise(res => { v.ondurationchange = res; setTimeout(res, 4000); });
+    }
+    return {v: v, url: url};
+  }
+  async function grabFrames(v, times){
+    const out = [];
+    for (const t of times) {
+      while (scanning) await sleep(500);      // scanning always comes first
+      if (t < 0 || (isFinite(v.duration) && t > v.duration)) continue;
+      await seekTo(v, t);
+      try { const c = toCanvas(v, 960); out.push({t: t, c: c, sharp: sharpness(c), hasCode: !!locate(c)}); } catch(e){}
+    }
+    return out;
+  }
+  const range = (a, b, step) => { const r = []; for (let t = a; t <= b + 1e-6; t += step) r.push(Math.round(t * 100) / 100); return r; };
+  const identified = id => { const it = items.find(x => x.id === id); const n = it && it.info && it.info.nameFrom; return n === 'shops' || n === 'db' || n === 'similar'; };
+  function studyBar(text){
+    let b = $('#studyBar');
+    if (!b) { b = document.createElement('div'); b.id = 'studyBar'; document.body.append(b); }
+    b.textContent = text; b.hidden = !text;
+  }
+  function analyzeAndWait(job){ return new Promise(res => { job.onDone = res; analyzeLater(job); }); }
+  async function studyVideo(segs, marks){
+    if (!segs.length || !marks.length) return;
+    const total = marks.length;
+    try {
+      for (const seg of segs) {
+        const here = marks.filter(m => m.t >= seg.start - 500 && m.t <= seg.end + 500).map(m => ({id: m.id, vt: (m.t - seg.start) / 1000}));
+        if (!here.length) continue;
+        const {v, url} = await openVideo(seg.blob);
+        try {
+          const passes = [
+            {label: 'around each scan', times: m => range(m.vt - 1.5, m.vt + 2.5, 0.5), pick: fr => fr.sort((a, b) => b.sharp - a.sharp).slice(0, 4), only: () => true},
+            {label: 'a wider look', times: m => range(m.vt - 6, m.vt - 2, 0.5).concat(range(m.vt + 3, m.vt + 7, 0.5)),
+             pick: fr => fr.sort((a, b) => (a.hasCode - b.hasCode) || (b.sharp - a.sharp)).slice(0, 4), only: m => !identified(m.id)},
+            {label: 'the whole video', times: (m, i) => {
+               const prev = i ? (here[i-1].vt + m.vt) / 2 : 0, next = i < here.length - 1 ? (here[i+1].vt + m.vt) / 2 : (v.duration || m.vt + 10);
+               return range(prev, next, 1);
+             }, pick: fr => fr.sort((a, b) => (a.hasCode - b.hasCode) || (b.sharp - a.sharp)).slice(0, 5), only: m => !identified(m.id)}
+          ];
+          for (let p = 0; p < passes.length; p++) {
+            const pass = passes[p];
+            for (let i = 0; i < here.length; i++) {
+              const m = here[i];
+              if (!items.find(x => x.id === m.id) || !pass.only(m)) continue;
+              studyBar('🎞 Studying the scan video — ' + pass.label + ' (' + (marks.findIndex(x => x.id === m.id) + 1) + ' of ' + total + ')');
+              const frames = pass.pick(await grabFrames(v, pass.times(m, i))).map(f => f.c);
+              if (frames.length) await analyzeAndWait({id: m.id, frames: frames, keepOld: true});
+            }
+          }
+        } finally {
+          v.removeAttribute('src'); try { v.load(); } catch(e){}
+          URL.revokeObjectURL(url);
+        }
+      }
+    } finally {
+      segs.forEach(sg => { sg.blob = null; });   // the video is gone from memory
+      segs.length = 0;
+      studyBar('');
+      toastSoft('Finished studying the scan video — the video was deleted');
+    }
+  }
   // ----- the queue -----
   const queue = [];
   let analyzing = false;
   function analyzeLater(job){
     queue.push(job);
     // only the most recent few keep their camera frames, to save memory
-    queue.slice(0, -5).forEach(j => { j.frames = []; j.photo = null; });
+    queue.slice(0, -5).forEach(j => { if (!j.onDone) { j.frames = []; j.photo = null; } });
     pump();
   }
   async function pump(){
@@ -1726,6 +1861,7 @@
     if (!job) return;
     analyzing = true;
     try { await analyze(job); } catch(e){}
+    try { if (job.onDone) job.onDone(); } catch(e){}
     analyzing = false;
     setTimeout(pump, 30);
   }
@@ -1810,6 +1946,14 @@
           if ((known || shop) && seen.price && seen.size) break;
         }
       }
+    }
+    if (job.keepOld && old && (old.seenText || old.nameFrom === 'camera' || old.sizeFrom === 'camera')) {
+      seen = seen || {guess: '', price: '', size: '', text: '', raw: [], heb: 0};
+      seen.raw = (seen.raw || []).concat((old.seenText || '').split(' ').filter(Boolean));
+      if (!seen.guess && old.nameFrom === 'camera') seen.guess = old.name;
+      if (!seen.size && old.sizeFrom === 'camera') seen.size = old.quantity;
+      if (!seen.price && old.price && old.price.src === 'camera') seen.price = old.price.text;
+      if ((old.seenText || '').length > (seen.text || '').length) seen.text = old.seenText;
     }
     let colour = '';
     try { if (frames.length) colour = packageColour(frames[0]); } catch(e){}
@@ -2054,7 +2198,7 @@
   }
   let pass = 0, lastBox = null, lastBoxAt = 0;
   const frameBuf = []; let lastBufAt = 0;
-  window.__bwTest = {locate: locate, straighten: straighten, searchByWords: (w, s, t) => searchByWords(w, s, t), readClues: readClues, similarProducts: similarProducts, barcodeNeighbours: barcodeNeighbours, packageColour: packageColour, aroundBarcode: aroundBarcode};
+  window.__bwTest = {locate: locate, straighten: straighten, searchByWords: (w, s, t) => searchByWords(w, s, t), studyState: () => ({segs: videoSegs.length, marks: videoMarks.length, recording: !!rec}), readClues: readClues, similarProducts: similarProducts, barcodeNeighbours: barcodeNeighbours, packageColour: packageColour, aroundBarcode: aroundBarcode};
   async function detectFrame(v){
     pass++;
     let box = null;
@@ -2193,6 +2337,7 @@
     setTimeout(() => { if (scanning && job.frames) try { job.frames.splice(1, 0, toCanvas($('#vid'), 960)); } catch(e){} }, 450);
     setTimeout(() => { if (scanning && job.frames) try { job.frames.splice(2, 0, toCanvas($('#vid'), 960)); } catch(e){} }, 900);
     analyzeLater(job);
+    videoMarks.push({id: it.id, t: performance.now()});
     sessionCount++;
     $('#scanCount').textContent = sessionCount + ' saved';
     setMsg((n > 1 ? 'Saved again ×' + n + ' · ' : 'Saved ' + fmtLabel(r.format) + ' · ') + r.value + (fromNumbers ? ' (read from the numbers)' : ''));
@@ -2209,6 +2354,12 @@
   /* ---------- toast ---------- */
   let tt;
   function toast(msg){ const t = $('#toast'); t.textContent = msg; t.classList.remove('act'); t.classList.add('on'); clearTimeout(tt); tt = setTimeout(() => t.classList.remove('on'), 2200); }
+  // background news waits while a message with an Undo button is showing
+  function toastSoft(msg){
+    const t = $('#toast');
+    if (t.classList.contains('act') && t.classList.contains('on')) { setTimeout(() => toastSoft(msg), 1500); return; }
+    toast(msg);
+  }
   function toastUndo(msg, undo){
     const t = $('#toast'); t.textContent = msg;
     const b = document.createElement('button'); b.type = 'button'; b.className = 'toast-btn'; b.textContent = 'Undo';

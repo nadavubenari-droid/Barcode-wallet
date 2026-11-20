@@ -948,14 +948,14 @@
       try { const r = await detectFrame(v); trackScene(v, r); if (r) onCode(r, v); else candN = 0; } catch(e){}
       busy = false;
     }
-    loopT = setTimeout(loop, 150);
+    loopT = setTimeout(loop, 60);
   }
   /* "Is the product gone?" — a tiny greyscale picture of the view is kept from the
      moment of each scan. The same barcode only counts again after the whole view has
      changed a lot from that picture (product taken away) and stayed changed for a moment. */
   const SIG_W = 32, SIG_H = 24;
   const SCENE_DIFF = 0.55;   // 0 = identical view, ~1.1 = completely different view
-  const CLEAR_MS = 350;      // how long the view must stay changed
+  const CLEAR_MS = 120;      // first-to-last changed check; with checks every ~60ms this means the product was gone ~0.2s
   const sigCanvas = document.createElement('canvas'); sigCanvas.width = SIG_W; sigCanvas.height = SIG_H;
   const sigCtx = sigCanvas.getContext('2d', {willReadFrequently: true});
   function sceneSig(v){

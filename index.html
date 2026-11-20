@@ -207,6 +207,20 @@
   #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(20px);background:var(--ink);color:#fff;padding:11px 18px;border-radius:12px;font-size:14px;font-weight:500;opacity:0;pointer-events:none;transition:.2s;z-index:40;max-width:90vw;text-align:center}
   #toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
   #toast.act{pointer-events:auto}
+  .pos-btn{grid-column:1/-1}
+  .pos-thumbs{display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 12px}
+  .pos-thumbs img{width:58px;height:58px;object-fit:cover;border-radius:10px;border:1px solid var(--line)}
+  .pos-rows{display:flex;flex-direction:column;gap:8px;margin:6px 0 12px;max-height:52vh;overflow:auto}
+  .pos-row{display:grid;grid-template-columns:28px 1fr auto;gap:6px 8px;align-items:center;background:#151412;border:1px solid var(--line);border-radius:12px;padding:8px}
+  .pos-row.doubt{border-color:#7a5a12}
+  .pos-row .n{font:800 15px Inter;text-align:center}
+  .pos-row input,.pos-row select{width:100%;padding:8px 9px;border:1px solid var(--line);border-radius:9px;background:#0e0d0b;color:var(--ink);font-size:15px}
+  .pos-row .code{grid-column:2/3;font-family:"JetBrains Mono",monospace;letter-spacing:.04em}
+  .pos-row .side{grid-row:1/3;grid-column:3;display:flex;flex-direction:column;gap:6px;align-items:center}
+  .pos-row .side select{width:62px;padding:6px}
+  .pos-row .x{background:none;border:0;color:var(--danger);font-size:20px;padding:2px 6px}
+  .pos-row .warn-t{grid-column:2/3;font-size:12px;color:#ffd27a}
+  .pos-note{font-size:13px;color:var(--muted);margin:0 0 10px}
   #studyBar{position:fixed;left:50%;transform:translateX(-50%);bottom:84px;background:#1a1814;color:#fff;font-size:13px;font-weight:500;padding:9px 14px;border-radius:12px;z-index:19;max-width:92vw;text-align:center;box-shadow:0 8px 24px rgba(0,0,0,.25)}
   #studyBar[hidden]{display:none}
   .toast-btn{background:none;border:0;color:#ffb38f;font-weight:700;font-size:14px;margin-left:12px;padding:2px 4px}
@@ -270,6 +284,7 @@
     </button>
     <button type="button" class="btn" id="picBtn">Choose photos</button>
     <button class="btn" id="typeBtn" type="button">Type a number</button>
+    <button class="btn pos-btn" id="posBtn" type="button">🧾 Photos of a cashier screen</button>
     <button class="btn reel-btn" id="reelBtn" type="button"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10.5-6.5z"/></svg>Reel mode</button>
   </div>
   <label class="toggle">
@@ -279,6 +294,8 @@
   </label>
   <input class="vh" id="camIn" type="file" accept="image/*">
   <input class="vh" id="picIn" type="file" accept="image/*" multiple>
+  <input class="vh" id="posCam" type="file" accept="image/*" capture="environment">
+  <input class="vh" id="posPick" type="file" accept="image/*" multiple>
 
   <div id="empty"><b>Nothing saved yet</b>Scan a loyalty card, ticket or coupon and it'll live here, ready to show.</div>
   <div id="foldersWrap" hidden><p class="section-title">Scans</p><div id="folders" class="stack"></div><p class="keep-note">Scans are deleted automatically after 7 days.</p></div>
@@ -1019,6 +1036,244 @@
       }});
   }
   $('#typeBtn').addEventListener('click', typeSheet);
+
+  /* ---------- reading a cashier's screen ----------
+     A photo of the till screen is read (Hebrew + English, plus a digits-only pass). The words are
+     grouped into lines; product codes are the long numbers that pass the barcode check digit (or,
+     for shops' own short codes, sit in the same column as the others). Each code's name is the
+     text on its own line or the nearest line next to it. Headers, totals, dates, phone and
+     customer numbers, coupons and discounts are left out. */
+  const POS_SKIP = /סה"?כ|סה״כ|לתשלום|תשלום|תאריך|שעה|קופה|קופאי|סניף|תחנה|טלפון|נייד|לקוח|מועדון|עובד|חשבונית|אסמכתא|קבלה|אשראי|מזומן|עודף|יתרה|נקודות|ת\.?ז|מס['׳]? |total|subtotal|date|time|phone|card|receipt|change|cashier|member|points|vat|מע"?מ/i;
+  const POS_NOT_PRODUCT = /קופון|הנחה|מבצע|הטבה|discount|coupon|promo|%/i;
+  function digitsFix(code){
+    // the reader often mixes up a few digit shapes; try changing one digit to make the check digit right
+    if (gtinOk(code)) return {code: code, sure: true};
+    const alt = {'0': '86', '1': '74', '2': '7', '3': '85', '4': '1', '5': '63', '6': '58', '7': '12', '8': '3605', '9': '4'};
+    const found = new Set();
+    for (let i = 0; i < code.length; i++) for (const d of alt[code[i]] || '') {
+      const c = code.slice(0, i) + d + code.slice(i + 1);
+      if (gtinOk(c)) found.add(c);
+    }
+    return found.size === 1 ? {code: [...found][0], sure: false, fixed: true} : null;
+  }
+  function formatFor(code){
+    if (code.length === 13) return 'EAN_13';
+    if (code.length === 12) return 'UPC_A';
+    if (code.length === 8 && gtinOk(code)) return 'EAN_8';
+    return 'CODE_128';
+  }
+  // words: [{text, conf, x0, y0, x1, y1}] in one picture's coordinates
+  function parseScreen(words){
+    const ws = words.filter(w => w && w.text && String(w.text).trim()).map(w => ({...w, text: String(w.text).trim(), cy: (w.y0 + w.y1) / 2, h: Math.max(1, w.y1 - w.y0)}));
+    if (!ws.length) return [];
+    const hs = ws.map(w => w.h).sort((a, b) => a - b), medH = hs[Math.floor(hs.length / 2)];
+    // lines
+    const lines = [];
+    for (const w of ws.slice().sort((a, b) => a.cy - b.cy)) {
+      const ln = lines.find(l => Math.abs(l.cy - w.cy) < Math.max(medH, w.h) * 0.55);
+      if (ln) { ln.w.push(w); ln.cy = (ln.cy * (ln.w.length - 1) + w.cy) / ln.w.length; } else lines.push({cy: w.cy, w: [w]});
+    }
+    lines.sort((a, b) => a.cy - b.cy);
+    for (const l of lines) {
+      l.w.sort((a, b) => a.x0 - b.x0);
+      l.text = l.w.map(w => w.text).join(' ');
+      l.x0 = Math.min(...l.w.map(w => w.x0)); l.x1 = Math.max(...l.w.map(w => w.x1));
+      // the long number on the line (digits split by spaces are joined back)
+      let best = null, run = [], runX = 0;
+      const flush = () => {
+        const d = run.join('');
+        if (d.length >= 7 && d.length <= 14 && (!best || d.length > best.d.length)) best = {d: d, x: runX};
+        run = [];
+      };
+      for (const w of l.w) {
+        const t = w.text.replace(/[^\d]/g, '');
+        if (t && /^[\d\s\-–.]+$/.test(w.text)) { if (!run.length) runX = w.x0; run.push(t); } else { flush(); }
+      }
+      flush();
+      l.code = best ? best.d : '';
+      l.codeX = best ? best.x : 0;
+      l.letters = (l.text.replace(/[\d\s.,₪$€%:\-–|/\\()[\]"'״׳*+=~_]/g, '')).length;
+    }
+    // candidate product lines
+    let cands = lines.filter(l => l.code && !POS_SKIP.test(l.text) && !/^\d{1,2}[\/.]\d{1,2}[\/.]\d{2,4}/.test(l.text) && !/^0(5\d|[23489])\d{7}$/.test(l.code));
+    cands.forEach(l => { const f = digitsFix(l.code.length > 13 ? l.code.slice(-13) : l.code); l.fix = f; });
+    // shops' own short codes count only when they line up with the real barcodes (same column)
+    const sureXs = cands.filter(l => l.fix).map(l => l.codeX);
+    const colTol = medH * 3;
+    // everything else counts only when it lines up with the real barcodes (same column); it is kept
+    // but marked, so it can be checked in the review
+    cands = cands.filter(l => l.fix || (sureXs.length ? sureXs.some(x => Math.abs(x - l.codeX) < colTol) : cands.length >= 2 && l.code.length <= 10));
+    const out = [];
+    for (const l of cands) {
+      const i = lines.indexOf(l);
+      let name = '';
+      // name on the same line…
+      if (l.letters >= 3) name = l.text.replace(l.code, ' ');
+      // …or the nearest text line just below / above that isn't another code, a total or a coupon
+      if (!name) {
+        const near = [lines[i + 1], lines[i - 1]].filter(n => n && !n.code && n.letters >= 3 && !POS_SKIP.test(n.text) && Math.abs(n.cy - l.cy) < medH * 2.2);
+        const below = near.find(n => n.cy > l.cy && !POS_NOT_PRODUCT.test(n.text));
+        const above = near.find(n => n.cy < l.cy && !POS_NOT_PRODUCT.test(n.text));
+        name = (below || above || {text: ''}).text;
+      }
+      name = name.replace(/[₪$€]\s?\d+[.,]\d{2}|\d+[.,]\d{2}\s?[₪$€]?/g, ' ').replace(/\s{2,}/g, ' ').replace(/^[\s|:\-–]+|[\s|:\-–]+$/g, '').trim();
+      // quantity (x2, 2 יח', כמות 2)
+      const qm = /(?:^|\s)(?:x|×)\s?(\d{1,2})\b|\b(\d{1,2})\s?(?:x|×|יח['׳]?)(?:\s|$)|כמות[:\s]*(\d{1,2})/i.exec(l.text + ' ' + name);
+      const qty = qm ? Math.max(1, Math.min(20, +(qm[1] || qm[2] || qm[3]))) : 1;
+      name = name.replace(/(?:^|\s)(?:x|×)\s?\d{1,2}\b|\b\d{1,2}\s?(?:x|×|יח['׳]?)(?=\s|$)|כמות[:\s]*\d{1,2}/gi, ' ').replace(/\s{2,}/g, ' ').trim();
+      const code = l.fix ? l.fix.code : l.code;
+      out.push({code: code, format: formatFor(code), name: name.slice(0, 60), qty: qty, sure: !!(l.fix && l.fix.sure), fixed: !!(l.fix && l.fix.fixed), y: l.cy});
+    }
+    return out;
+  }
+  // join the lists from several photos into one, without repeating the rows that two photos share
+  function stitchLists(acc, next){
+    if (!acc.length) return {list: next.slice(), overlap: 0, placed: 'start'};
+    // the same row read twice: same number, or one digit different, or the same name
+    const same = (a, b) => {
+      if (a.code === b.code) return true;
+      if (a.code.length === b.code.length) { let d = 0; for (let i = 0; i < a.code.length; i++) if (a.code[i] !== b.code[i]) d++; if (d <= 1) return true; }
+      const ta = new Set(normTokens(a.name)), tb = normTokens(b.name);
+      return ta.size >= 2 && tb.length >= 2 && tb.filter(t => ta.has(t)).length >= Math.min(ta.size, tb.length) * 0.8;
+    };
+    const pick = (a, b) => (b.sure && !a.sure ? b : a);   // keep the better reading of a shared row
+    const maxK = Math.min(acc.length, next.length);
+    // next continues acc (its first rows = acc's last rows)
+    for (let k = maxK; k >= 1; k--) {
+      let ok = true;
+      for (let j = 0; j < k; j++) if (!same(acc[acc.length - k + j], next[j])) { ok = false; break; }
+      if (ok) return {list: acc.slice(0, acc.length - k).concat(acc.slice(acc.length - k).map((r, j) => pick(r, next[j])), next.slice(k)), overlap: k, placed: 'after'};
+    }
+    // next comes before acc (the photo was scrolled the other way)
+    for (let k = maxK; k >= 1; k--) {
+      let ok = true;
+      for (let j = 0; j < k; j++) if (!same(next[next.length - k + j], acc[j])) { ok = false; break; }
+      if (ok) return {list: next.slice(0, next.length - k).concat(acc.slice(0, k).map((r, j) => pick(r, next[next.length - k + j])), acc.slice(k)), overlap: k, placed: 'before'};
+    }
+    // a photo inside what we already have: nothing new
+    for (let st = 0; st + next.length <= acc.length; st++) {
+      if (next.every((r, j) => same(acc[st + j], r))) return {list: acc, overlap: next.length, placed: 'inside'};
+    }
+    return {list: acc.concat(next), overlap: 0, placed: 'after'};
+  }
+
+  // read one photo of a till screen: the words (Hebrew + English) and a digits-only pass, at the angle that works
+  async function readScreenPhoto(file){
+    let img; try { img = await loadImage(file); } catch(e){ return []; }
+    const base = toCanvas(img, 2400);
+    const big = base.width < 1700 ? upscale(base, 2200) : base;
+    await loadLabelOCR(); await loadOCR();
+    const toWords = data => wordsOf(data || {}).filter(w => w && w.bbox).map(w => ({text: w.text, conf: w.confidence, x0: w.bbox.x0, y0: w.bbox.y0, x1: w.bbox.x1, y1: w.bbox.y1}));
+    let best = [];
+    for (const deg of [0, 180, -5, 5, 90, -90]) {
+      const pic = enhance(deg ? rotated(big, deg) : big, 0.4);
+      let words = [], digits = [];
+      if (lblWorker) { try { const r = await withLabelWorker(w => w.recognize(pic, {}, {blocks: true, text: true})); words = toWords(r.data); } catch(e){} }
+      if (ocrWorker) { try { const r = await ocrWorker.recognize(pic, {}, {blocks: true, text: true}); digits = toWords(r.data); } catch(e){} }
+      let rows = parseScreen(words);
+      // the digits-only reading is better at numbers: use it to correct or add codes
+      const drows = parseScreen(digits.map(w => ({...w, text: w.text + ''})));
+      for (const d of drows.filter(d => d.sure)) {
+        const near = rows.find(r => Math.abs(r.y - d.y) < 25);
+        if (near && !near.sure) { near.code = d.code; near.format = d.format; near.sure = true; }
+        else if (!near && !rows.some(r => r.code === d.code)) rows.push({...d, name: ''});
+      }
+      rows.sort((a, b) => a.y - b.y);
+      if (rows.filter(r => r.sure).length > best.filter(r => r.sure).length || (!best.length && rows.length)) best = rows;
+      if (best.filter(r => r.sure).length >= 2) break;
+    }
+    return best;
+  }
+  let posFiles = [];
+  function posSheet(){
+    openSheet('<h2>Photos of a cashier screen</h2>' +
+      '<p class="pos-note">Photograph the list of products on the till screen, top to bottom. If it doesn’t fit in one photo, take more, each one overlapping the last by a row or two — repeats are removed automatically.</p>' +
+      '<div class="pos-thumbs"></div>' +
+      '<div class="row"><button class="btn" data-act="cam">📷 Take a photo</button><button class="btn" data-act="pick">🖼 Choose photos</button></div>' +
+      '<div class="col" style="margin-top:10px"><button class="btn primary" data-act="read">Read the list</button><button class="btn ghost" data-act="cancel">Cancel</button></div>',
+      {
+        cam: () => $('#posCam').click(), pick: () => $('#posPick').click(),
+        read: () => { if (!posFiles.length) { toast('Add a photo first'); return; } readScreens(posFiles.slice()); },
+        cancel: () => { posFiles = []; closeSheet(); }
+      },
+      el => {
+        const box = el.querySelector('.pos-thumbs');
+        posFiles.forEach(f => { const i = document.createElement('img'); i.alt = ''; i.src = URL.createObjectURL(f); box.append(i); });
+        el.querySelector('[data-act="read"]').textContent = posFiles.length ? 'Read the list (' + posFiles.length + (posFiles.length === 1 ? ' photo)' : ' photos)') : 'Read the list';
+      });
+  }
+  for (const id of ['#posCam', '#posPick']) {
+    $(id).addEventListener('change', e => {
+      const files = e.target.files ? [...e.target.files] : [];
+      e.target.value = '';
+      posFiles = posFiles.concat(files);
+      posSheet();
+    });
+  }
+  $('#posBtn').addEventListener('click', () => { posFiles = []; posSheet(); });
+  async function readScreens(files){
+    let list = [], notes = [];
+    for (let i = 0; i < files.length; i++) {
+      openSheet('<div class="working"><div class="spinner"></div><p></p></div>', null,
+        el => el.querySelector('p').textContent = 'Reading photo ' + (i + 1) + ' of ' + files.length + '…' + (i === 0 ? ' (the first time takes longer)' : ''));
+      await tick();
+      const rows = await readScreenPhoto(files[i]);
+      if (!rows.length) { notes.push('Photo ' + (i + 1) + ': no products found'); continue; }
+      const st = stitchLists(list, rows);
+      if (i > 0 && !st.overlap && list.length) notes.push('Photo ' + (i + 1) + ' didn’t overlap the others — check for repeats');
+      list = st.list;
+    }
+    reviewScreen(list, notes);
+  }
+  function reviewScreen(list, notes){
+    const rows = list.map(r => ({...r}));
+    const draw = el => {
+      const box = el.querySelector('.pos-rows'); box.textContent = '';
+      rows.forEach((r, i) => {
+        const d = document.createElement('div'); d.className = 'pos-row' + (r.sure ? '' : ' doubt');
+        d.innerHTML = '<span class="n"></span><input class="nm" dir="auto" placeholder="Name"><div class="side"><select></select><button type="button" class="x" aria-label="Remove">✕</button></div><input class="code" inputmode="numeric" placeholder="Barcode number">' + (r.sure ? '' : '<span class="warn-t">Check this number</span>');
+        d.querySelector('.n').textContent = i + 1;
+        const nm = d.querySelector('.nm'); nm.value = r.name || ''; nm.oninput = () => r.name = nm.value;
+        const cd = d.querySelector('.code'); cd.value = r.code; cd.oninput = () => { r.code = cd.value.replace(/\D/g, ''); r.format = formatFor(r.code); r.sure = gtinOk(r.code) && r.code.length >= 8; d.classList.toggle('doubt', !r.sure); };
+        const q = d.querySelector('select');
+        for (let k = 1; k <= 10; k++) { const o = document.createElement('option'); o.value = k; o.textContent = '×' + k; if (k === r.qty) o.selected = true; q.append(o); }
+        q.onchange = () => r.qty = +q.value;
+        d.querySelector('.x').onclick = () => { rows.splice(i, 1); draw(el); };
+        box.append(d);
+      });
+      const total = rows.reduce((n, r) => n + (r.code ? r.qty : 0), 0);
+      el.querySelector('[data-act="make"]').textContent = 'Create folder (' + total + (total === 1 ? ' barcode)' : ' barcodes)');
+    };
+    openSheet('<h2>Products on the screen</h2><p class="pos-note"></p><div class="pos-rows"></div>' +
+      '<div class="col"><button class="btn" data-act="add">+ Add a row</button><button class="btn primary" data-act="make">Create folder</button><button class="btn ghost" data-act="cancel">Cancel</button></div>',
+      {
+        add: () => { rows.push({code: '', format: 'CODE_128', name: '', qty: 1, sure: false}); draw($('#sheet')); const ins = $('#sheet').querySelectorAll('.pos-row .code'); if (ins.length) ins[ins.length - 1].focus(); },
+        make: () => {
+          const good = rows.filter(r => r.code && r.code.length >= 6);
+          if (!good.length) { toast('No barcodes to save'); return; }
+          const sid = Date.now();
+          let n = 0;
+          for (const r of good) for (let k = 0; k < r.qty; k++) {
+            const it = {value: r.code, format: r.format || formatFor(r.code), session: sid, created: sid + n * 10};
+            it.name = (r.name || defaultName(it)) + (r.qty > 1 ? ' (' + (k + 1) + ')' : '');
+            it.autoName = !r.name;
+            saveItem(it); n++;
+            prefetch(it.value);
+            analyzeLater({id: it.id, prio: 0});
+          }
+          posFiles = [];
+          closeSheet();
+          openFolderView(sid);
+          toast(plural(n) + ' from the cashier screen');
+        }
+      },
+      el => {
+        const found = rows.length, doubt = rows.filter(r => !r.sure).length;
+        el.querySelector('.pos-note').textContent = (found ? found + (found === 1 ? ' product' : ' products') + ' found, in the order on the screen.' : 'No products could be read — add them by hand, or try a sharper photo.') +
+          (doubt ? ' ' + doubt + ' marked to check (the number didn’t pass the barcode check).' : '') + (notes.length ? ' ' + notes.join('. ') + '.' : '');
+        draw(el);
+      });
+  }
 
   /* ---------- reel mode ---------- */
   const REEL_MS = 500, BLANK_MS = 500;
@@ -2613,7 +2868,7 @@
   }
   let pass = 0, lastBox = null, lastBoxAt = 0;
   const frameBuf = []; let lastBufAt = 0;
-  window.__bwTest = {locate: locate, straighten: straighten, searchByWords: (w, s, t) => searchByWords(w, s, t), studyState: () => ({segs: videoSegs.length, marks: videoMarks.length, recording: !!rec}), readClues: readClues, similarProducts: similarProducts, barcodeNeighbours: barcodeNeighbours, packageColour: packageColour, aroundBarcode: aroundBarcode};
+  window.__bwTest = {reviewScreen: (l, n) => reviewScreen(l, n), parseScreen: w => parseScreen(w), stitchLists: (a, b) => stitchLists(a, b), locate: locate, straighten: straighten, searchByWords: (w, s, t) => searchByWords(w, s, t), studyState: () => ({segs: videoSegs.length, marks: videoMarks.length, recording: !!rec}), readClues: readClues, similarProducts: similarProducts, barcodeNeighbours: barcodeNeighbours, packageColour: packageColour, aroundBarcode: aroundBarcode};
   async function detectFrame(v){
     pass++;
     let box = null;

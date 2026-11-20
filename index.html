@@ -137,8 +137,28 @@
   .grow{flex:1}
   .chip{background:rgba(0,0,0,.55);color:#fff;border:0;border-radius:99px;padding:9px 14px;font-weight:600;font-size:14px;backdrop-filter:blur(6px)}
   .chip.strong{background:#fff;color:#000}
+  .chip{white-space:nowrap}
+  .scan-top{flex-wrap:wrap;justify-content:flex-end}
+  .sound-pill{position:absolute;left:50%;top:72px;transform:translateX(-50%);z-index:4;box-shadow:0 6px 20px rgba(0,0,0,.35)}
   .chip.on{background:#ffd23d;color:#000}
   .scan-msg{position:absolute;left:50%;bottom:34px;transform:translateX(-50%);background:rgba(0,0,0,.6);color:#fff;padding:12px 18px;border-radius:14px;font-weight:500;max-width:90vw;text-align:center;backdrop-filter:blur(6px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #boxCanvas{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+  .reader-tag{position:absolute;left:0;right:0;bottom:10px;text-align:center;font-size:11px;color:rgba(255,255,255,.55)}
+  .scanpop{position:absolute;left:50%;top:46%;width:min(72vw,340px);background:#fff;border-radius:20px;padding:12px 14px 12px;
+    box-shadow:0 24px 60px rgba(0,0,0,.5);text-align:center;pointer-events:none;z-index:5;
+    transform:translate(-50%,-50%);animation:scanpop 1.25s cubic-bezier(.2,.8,.2,1) forwards}
+  .scanpop .pn{font:700 12px Inter;color:#1f8f5a;text-transform:uppercase;letter-spacing:.08em;margin-bottom:8px}
+  .scanpop .pc svg{width:100%;height:auto;max-height:96px;display:block;margin:0 auto}
+  .scanpop .pc img{max-width:100%;max-height:96px}
+  .scanpop .pv{font:500 15px "JetBrains Mono",monospace;color:#000;margin-top:8px;letter-spacing:.05em;word-break:break-all}
+  @keyframes scanpop{
+    0%{transform:translate(-50%,-50%) scale(.35) rotate(-4deg);opacity:0}
+    16%{transform:translate(-50%,-50%) scale(1.07) rotate(1deg);opacity:1}
+    26%{transform:translate(-50%,-50%) scale(1) rotate(0)}
+    68%{transform:translate(-50%,-50%) scale(1);opacity:1;left:50%;top:46%}
+    100%{transform:translate(-50%,-50%) scale(.12);opacity:0;left:60px;top:40px}}
+  #scanCount.bump{animation:bump .45s ease-out .8s}
+  @keyframes bump{40%{transform:scale(1.35);background:#2fa36b}}
   @keyframes laser{from{top:18%}to{top:82%}}
   .reel-btn{grid-column:1/-1;background:var(--ink);color:#fff}
   #reel{position:fixed;inset:0;background:#fff;z-index:22;display:flex;flex-direction:column}
@@ -200,17 +220,19 @@
 
 <div id="scan" hidden>
   <video id="vid" playsinline muted autoplay></video>
+  <canvas id="boxCanvas"></canvas>
   <div class="reticle" id="reticle"><i></i></div>
   <div class="scan-top">
     <span id="scanCount" class="chip">0 saved</span>
     <span class="grow"></span>
-    <button id="soundBtn" class="chip on" type="button" hidden>🔊 Tap to turn sound on</button>
     <button id="lensBtn" class="chip" type="button" hidden></button>
     <button id="torchBtn" class="chip" type="button" hidden>Light</button>
     <button id="scanReel" class="chip" type="button">▶ Reel</button>
     <button id="scanDone" class="chip strong" type="button">Done</button>
   </div>
+  <button id="soundBtn" class="chip on sound-pill" type="button" hidden>🔊 Tap to turn sound on</button>
   <div id="scanMsg" class="scan-msg" dir="auto">Point at a barcode</div>
+  <div id="readerTag" class="reader-tag"></div>
 </div>
 
 <div id="reel" hidden>
@@ -906,6 +928,7 @@
       if (!told) { toast("This phone doesn't let websites use its ultra-wide camera, so the normal one is used"); try { localStorage.setItem('barcode-wallet-noultra', '1'); } catch(e){} }
     }
     await initDetector();
+    updateReaderTag();
     scanning = true; cand = ''; candN = 0;
     clearInterval(sceneT); sceneT = setInterval(sceneTick, 40);
     clearInterval(ocrT); ocrT = setInterval(ocrTick, 250); ocrPrev = '';
@@ -915,6 +938,7 @@
   }
   function stopTracks(){
     scanning = false; clearTimeout(loopT); clearInterval(sceneT); clearInterval(ocrT);
+    try { boxCv.getContext('2d').clearRect(0, 0, boxCv.width, boxCv.height); } catch(e){}
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
     $('#vid').srcObject = null; torchOn = false;
   }
@@ -1053,12 +1077,12 @@
         if (f && f.length) detector = new BarcodeDetector({formats: f});
       } catch(e){ detector = false; }
     }
-    if (!detector) loadWasm();
+    loadWasm();
   }
   let wasmMod = null, wasmLoading = null;
   function loadWasm(){
     if (!wasmLoading) wasmLoading = import('https://cdn.jsdelivr.net/npm/zxing-wasm@2/reader/+esm')
-      .then(m => { if (m && typeof m.readBarcodes === 'function') wasmMod = m; })
+      .then(m => { if (m && typeof m.readBarcodes === 'function') wasmMod = m; updateReaderTag(); })
       .catch(() => {});
     return wasmLoading;
   }
@@ -1158,9 +1182,163 @@
     return findGtin(res && res.data ? res.data.text : '');
   }
 
-  let pass = 0;
+  function updateReaderTag(){
+    const parts = [];
+    if (detector) parts.push('built-in');
+    if (wasmMod) parts.push('zxing');
+    if (!parts.length) parts.push('basic');
+    const t = $('#readerTag'); if (t) t.textContent = 'Reader: ' + parts.join(' + ');
+  }
+
+  /* ---------- finding barcodes fast ----------
+     A small copy of each frame is split into 8×8 squares. A square that is full of strong
+     edges all pointing the same way looks like part of a barcode. Touching squares with the
+     same direction are grouped; the best group gives where the barcode is and how it is
+     turned. That piece is then cut out, turned straight, zoomed in and read on its own. */
+  const LOC_W = 320, CELL = 8;
+  const locCv = document.createElement('canvas'), locCtx = locCv.getContext('2d', {willReadFrequently: true});
+  function locate(v){
+    const vw = v.videoWidth || v.width, vh = v.videoHeight || v.height;
+    if (!vw || !vh) return null;
+    const W = LOC_W, H = Math.round(LOC_W * vh / vw);
+    if (locCv.width !== W || locCv.height !== H) { locCv.width = W; locCv.height = H; }
+    locCtx.drawImage(v, 0, 0, W, H);
+    const d = locCtx.getImageData(0, 0, W, H).data, g = new Float32Array(W * H);
+    for (let i = 0, j = 0; i < g.length; i++, j += 4) g[i] = d[j] * 0.3 + d[j+1] * 0.59 + d[j+2] * 0.11;
+    const cw = Math.floor(W / CELL), chh = Math.floor(H / CELL), n = cw * chh;
+    const Jxx = new Float32Array(n), Jyy = new Float32Array(n), Jxy = new Float32Array(n);
+    const ymax = Math.min(chh * CELL, H - 1), xmax = Math.min(cw * CELL, W - 1);
+    for (let y = 1; y < ymax; y++) {
+      const row = ((y / CELL) | 0) * cw;
+      for (let x = 1; x < xmax; x++) {
+        const i = y * W + x;
+        const gx = g[i-W+1] + 2*g[i+1] + g[i+W+1] - g[i-W-1] - 2*g[i-1] - g[i+W-1];
+        const gy = g[i+W-1] + 2*g[i+W] + g[i+W+1] - g[i-W-1] - 2*g[i-W] - g[i-W+1];
+        const c = row + ((x / CELL) | 0);
+        Jxx[c] += gx * gx; Jyy[c] += gy * gy; Jxy[c] += gx * gy;
+      }
+    }
+    const E = new Float32Array(n), coh = new Float32Array(n);
+    let maxE = 0;
+    for (let c = 0; c < n; c++) {
+      const e = Jxx[c] + Jyy[c], df = Jxx[c] - Jyy[c];
+      E[c] = e; if (e > maxE) maxE = e;
+      coh[c] = e > 0 ? Math.sqrt(df * df + 4 * Jxy[c] * Jxy[c]) / e : 0;
+    }
+    if (!maxE) return null;
+    const med = Float32Array.from(E).sort()[n >> 1];
+    const thr = Math.max(med * 4, maxE * 0.05, CELL * CELL * 1500);
+    const mark = new Uint8Array(n);
+    for (let c = 0; c < n; c++) if (E[c] > thr && coh[c] > 0.5) mark[c] = 1;
+    const ang = c => 0.5 * Math.atan2(2 * Jxy[c], Jxx[c] - Jyy[c]);
+    const seen = new Uint8Array(n);
+    const NB = [[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,-1],[1,-1],[-1,1]];
+    let best = null;
+    for (let c0 = 0; c0 < n; c0++) {
+      if (!mark[c0] || seen[c0]) continue;
+      const a0 = ang(c0), stack = [c0], cells = [];
+      seen[c0] = 1;
+      while (stack.length) {
+        const c = stack.pop(); cells.push(c);
+        const cx = c % cw, cy = (c / cw) | 0;
+        for (const [dx, dy] of NB) {
+          const nx = cx + dx, ny = cy + dy;
+          if (nx < 0 || ny < 0 || nx >= cw || ny >= chh) continue;
+          const m = ny * cw + nx;
+          if (!mark[m] || seen[m]) continue;
+          let da = Math.abs(ang(m) - a0); da = Math.min(da, Math.PI - da);
+          if (da > 0.35) continue;
+          seen[m] = 1; stack.push(m);
+        }
+      }
+      if (cells.length < 4) continue;
+      let A = 0, B = 0, sc = 0;
+      for (const c of cells) { A += Jxx[c] - Jyy[c]; B += 2 * Jxy[c]; sc += coh[c]; }
+      if (!best || sc > best.score) best = {cells: cells, th: 0.5 * Math.atan2(B, A), score: sc};
+    }
+    if (!best) return null;
+    const th = best.th, ux = Math.cos(th), uy = Math.sin(th), wx = -uy, wy = ux;
+    let u0 = Infinity, u1 = -Infinity, w0 = Infinity, w1 = -Infinity;
+    for (const c of best.cells) {
+      const px = (c % cw + 0.5) * CELL, py = (((c / cw) | 0) + 0.5) * CELL;
+      const pu = px * ux + py * uy, pw = px * wx + py * wy;
+      if (pu < u0) u0 = pu; if (pu > u1) u1 = pu; if (pw < w0) w0 = pw; if (pw > w1) w1 = pw;
+    }
+    u0 -= CELL / 2; u1 += CELL / 2; w0 -= CELL / 2; w1 += CELL / 2;
+    const mu = (u0 + u1) / 2, mw = (w0 + w1) / 2, hu = (u1 - u0) / 2, hw = (w1 - w0) / 2;
+    const cx = mu * ux + mw * wx, cy = mu * uy + mw * wy;
+    const corners = [[-1,-1],[1,-1],[1,1],[-1,1]].map(([a, b]) => [cx + a*hu*ux + b*hw*wx, cy + a*hu*uy + b*hw*wy]);
+    return {cx: cx, cy: cy, th: th, hu: hu, hw: hw, scale: vw / W, corners: corners};
+  }
+  // cut the barcode out, turned so its bars stand upright, zoomed in; wPad adds room above/below
+  function straighten(v, b, wPad){
+    const s = b.scale;
+    const lenU = (2 * b.hu * 1.25 + 16) * s, lenW = (2 * b.hw * (1 + wPad) + 8) * s;
+    const k = Math.min(3, 1000 / lenU, 900 / lenW);
+    const c = document.createElement('canvas');
+    c.width = Math.max(16, Math.round(lenU * k)); c.height = Math.max(16, Math.round(lenW * k));
+    const x = c.getContext('2d', {willReadFrequently: true});
+    x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
+    x.imageSmoothingQuality = 'high';
+    x.translate(c.width / 2, c.height / 2); x.scale(k, k); x.rotate(-b.th); x.translate(-b.cx * s, -b.cy * s);
+    x.drawImage(v, 0, 0);
+    return c;
+  }
+  const boxCv = document.getElementById('boxCanvas');
+  function drawBox(v, b){
+    const W = boxCv.clientWidth, H = boxCv.clientHeight, dpr = window.devicePixelRatio || 1;
+    if (!W || !H) return;
+    if (boxCv.width !== Math.round(W * dpr) || boxCv.height !== Math.round(H * dpr)) { boxCv.width = Math.round(W * dpr); boxCv.height = Math.round(H * dpr); }
+    const x = boxCv.getContext('2d');
+    x.setTransform(dpr, 0, 0, dpr, 0, 0); x.clearRect(0, 0, W, H);
+    if (!b) return;
+    const vw = v.videoWidth, vh = v.videoHeight, sc = Math.max(W / vw, H / vh), ox = (W - vw * sc) / 2, oy = (H - vh * sc) / 2;
+    x.strokeStyle = '#ff5b1f'; x.lineWidth = 3; x.lineJoin = 'round'; x.shadowColor = 'rgba(255,91,31,.8)'; x.shadowBlur = 10;
+    x.beginPath();
+    b.corners.forEach(([px, py], i) => { const X = ox + px * b.scale * sc, Y = oy + py * b.scale * sc; i ? x.lineTo(X, Y) : x.moveTo(X, Y); });
+    x.closePath(); x.stroke();
+  }
+  // read one picture with every reader that is available
+  async function readCanvas(c){
+    if (detector) {
+      try { const r = await detector.detect(c); const hit = r && r.find(x => x.rawValue); if (hit) return {value: hit.rawValue, format: normFmt(hit.format)}; } catch(e){}
+    }
+    if (wasmMod) { try { const r = await wasmRead(c); if (r) return r; } catch(e){} }
+    if (!detector && !wasmMod && window.ZXing) {
+      const Z = window.ZXing;
+      if (!zxReader) { zxHints = new Map(); zxReader = new Z.MultiFormatReader(); zxReader.setHints(zxHints); }
+      try {
+        const r = zxReader.decode(new Z.BinaryBitmap(new Z.HybridBinarizer(new Z.HTMLCanvasElementLuminanceSource(c))), zxHints);
+        if (r && r.getText()) return {value: r.getText(), format: normFmt(Z.BarcodeFormat[r.getBarcodeFormat()])};
+      } catch(e){}
+    }
+    return null;
+  }
+
+  async function readNumbersBox(v, b){
+    if (!ocrWorker) { await loadOCR(); if (!ocrWorker) return null; }
+    const st = enhance(straighten(v, b, 1.6), 0);
+    for (const c of [st, rotated(st, 180)]) {
+      const res = await ocrWorker.recognize(c);
+      const g = findGtin(res && res.data ? res.data.text : '');
+      if (g) return g;
+    }
+    return null;
+  }
+  let pass = 0, lastBox = null, lastBoxAt = 0;
+  window.__bwTest = {locate: locate, straighten: straighten};
   async function detectFrame(v){
     pass++;
+    let box = null;
+    try { box = locate(v); } catch(e){}
+    drawBox(v, box);
+    if (box) { lastBox = box; lastBoxAt = Date.now(); }
+    // something that looks like a barcode: read the straightened close-up first
+    if (box && pass % 2) {
+      const st = straighten(v, box, 0.15);
+      const r = await readCanvas(pass % 4 === 1 ? st : enhance(st, 0.7));
+      if (r) return r;
+    }
     if (detector) {
       // rotate between the whole view, a close-up of the middle (small codes in a wide view),
       // and a sharpened close-up (blurry codes)
@@ -1193,7 +1371,7 @@
       try { const r = await detectFrame(v); trackScene(r, t0); if (r) { lastReadAt = Date.now(); onCode(r, v, t0); } else candN = 0; } catch(e){}
       busy = false;
     }
-    loopT = setTimeout(loop, 60);
+    loopT = setTimeout(loop, 15);
   }
   /* "Is the product gone?" — a tiny greyscale picture of the view is kept from the
      moment of each scan. The same barcode only counts again after the whole view has
@@ -1210,7 +1388,7 @@
     ocrBusy = true;
     try {
       const t0 = Date.now();
-      const g = await readNumbers(v);
+      const g = (lastBox && Date.now() - lastBoxAt < 500) ? await readNumbersBox(v, lastBox) : await readNumbers(v);
       if (!g) { ocrPrev = ''; return; }
       if (g.value !== ocrPrev) { ocrPrev = g.value; return; }
       ocrPrev = '';
@@ -1248,6 +1426,18 @@
     if (clearStart && t0 > clearStart) clearStart = 0;
   }
 
+  function popScan(it){
+    const p = document.createElement('div');
+    p.className = 'scanpop';
+    p.innerHTML = '<div class="pn"></div><div class="pc"></div><div class="pv" dir="auto"></div>';
+    p.querySelector('.pn').textContent = '✓ Saved · ' + fmtLabel(it.format);
+    p.querySelector('.pc').append(codeNode(it, false));
+    p.querySelector('.pv').textContent = it.value;
+    $('#scan').append(p);
+    p.addEventListener('animationend', () => p.remove());
+    setTimeout(() => p.remove(), 2500);
+    const cnt = $('#scanCount'); cnt.classList.remove('bump'); void cnt.offsetWidth; cnt.classList.add('bump');
+  }
   function onCode(r, v, t0, fromNumbers){
     const now = Date.now();
     // the same product hasn't left the view yet: not a new scan
@@ -1270,7 +1460,7 @@
     sessionCount++;
     $('#scanCount').textContent = sessionCount + ' saved';
     setMsg((n > 1 ? 'Saved again ×' + n + ' · ' : 'Saved ' + fmtLabel(r.format) + ' · ') + r.value + (fromNumbers ? ' (read from the numbers)' : ''));
-    flash('ok'); beep('ok');
+    flash('ok'); beep('ok'); popScan(it);
     try { if (navigator.vibrate) navigator.vibrate(70); } catch(e){}
   }
   document.addEventListener('visibilitychange', () => {

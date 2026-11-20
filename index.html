@@ -66,6 +66,20 @@
   .folder-ic svg{width:26px;height:26px}
   .count-badge{font:600 13px Inter;color:var(--muted);background:#efe8db;border-radius:99px;padding:3px 9px;white-space:nowrap}
   #folderView{min-height:100vh;background:var(--bg)}
+  #folderView .wrap{padding:16px 10px 60px;max-width:900px}
+  #folderView .back,#folderView .fv-title,#folderView .fv-sub,#folderView .actions{margin-left:6px;margin-right:6px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(155px,1fr));gap:8px}
+  .tile{position:relative;background:var(--card);border:1px solid var(--line);border-radius:16px;overflow:hidden}
+  .tile-main{display:block;width:100%;border:0;background:none;padding:0;text-align:left;-webkit-tap-highlight-color:transparent}
+  .tile-main:active{background:#f7f2e9}
+  .tile-pic{position:relative;aspect-ratio:1/1;background:#fff;display:flex;align-items:center;justify-content:center;overflow:hidden}
+  .tile-pic img{width:100%;height:100%;object-fit:cover;display:block}
+  .tile-pic .tile-code,.tile-pic svg{width:80%;height:auto;max-height:70%}
+  .tile-num{position:absolute;top:8px;left:8px;min-width:32px;height:32px;padding:0 8px;border-radius:99px;background:#1a1814;color:#fff;font:800 17px/32px Inter,sans-serif;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.35)}
+  .tile-name{font-weight:600;font-size:14px;line-height:1.3;padding:8px 10px 0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.6em}
+  .tile-sub{font:500 13px/1.3 Inter,sans-serif;color:var(--muted);padding:2px 10px 10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .tile-del{position:absolute;top:8px;right:8px;width:34px;height:34px;border-radius:50%;border:0;background:rgba(255,255,255,.92);color:var(--danger);display:grid;place-items:center;box-shadow:0 2px 8px rgba(0,0,0,.25)}
+  .tile-del svg{width:18px;height:18px}
   #folderView[hidden]{display:none}
   .back{padding:0;margin:0 0 14px;font-size:16px}
   .fv-title{font:700 26px/1.15 "Space Grotesk";margin:0 0 4px}
@@ -243,7 +257,7 @@
       <button class="btn reel-btn half" id="fvReel" type="button"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10.5-6.5z"/></svg>Reel mode</button>
       <button class="btn primary half" id="fvScan" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>Scan more</button>
     </div>
-    <div id="fvList" class="stack"></div>
+    <div id="fvList" class="grid"></div>
     <button class="btn danger fv-del" id="fvDelete" type="button">Delete this folder</button>
   </div>
 </div>
@@ -332,6 +346,7 @@
     if (it.info) b.info = it.info;
     if (typeof it.autoName === 'boolean') b.autoName = it.autoName;
     if (it.avatar) b.avatar = it.avatar;
+    if (it.pic) b.pic = it.pic;
     return b;
   }
 
@@ -476,7 +491,8 @@
     const n = codeNode(it, false); n.classList.add('code-in-avatar'); return n;
   }
   // a square close-up of the product around where the barcode was found
-  function makeAvatar(src){
+  function makeAvatar(src, size){
+    size = size || 128;
     const W = src.videoWidth || src.width, H = src.videoHeight || src.height;
     if (!W || !H) return '';
     let cx = W / 2, cy = H / 2, side = Math.min(W, H) * 0.7;
@@ -486,10 +502,10 @@
     } catch(e){}
     side = Math.min(side, W, H);
     const x0 = Math.max(0, Math.min(W - side, cx - side / 2)), y0 = Math.max(0, Math.min(H - side, cy - side / 2));
-    const c = document.createElement('canvas'); c.width = c.height = 128;
+    const c = document.createElement('canvas'); c.width = c.height = size;
     const x = c.getContext('2d'); x.imageSmoothingQuality = 'high';
-    x.drawImage(src, x0, y0, side, side, 0, 0, 128, 128);
-    return c.toDataURL('image/jpeg', 0.8);
+    x.drawImage(src, x0, y0, side, side, 0, 0, size, size);
+    return c.toDataURL('image/jpeg', size > 200 ? 0.76 : 0.8);
   }
   function folderCollage(f){
     const pics = f.items.map(avatarSrc).filter(Boolean).slice(0, 4);
@@ -539,9 +555,31 @@
     $('#fvTitle').textContent = folderName(f.first);
     $('#fvSub').textContent = plural(f.items.length) + ', in the order you scanned them';
     const l = $('#fvList'); l.textContent = '';
-    f.items.forEach(it => {
-      const row = document.createElement('div'); row.className = 'card-row';
-      const del = document.createElement('button'); del.type = 'button'; del.className = 'del-btn';
+    f.items.forEach((it, idx) => {
+      l.append(tileCard(it, idx + 1));
+    });
+  }
+  // a big picture tile: scan-order number, name, price, remove button
+  function tileCard(it, num){
+    const tile = document.createElement('div'); tile.className = 'tile';
+    const main = document.createElement('button'); main.type = 'button'; main.className = 'tile-main';
+    main.innerHTML = '<div class="tile-pic"></div><div class="tile-name" dir="auto"></div><div class="tile-sub" dir="auto"></div>';
+    const pic = main.querySelector('.tile-pic');
+    const db = it.info && it.info.image && /^https:\/\//.test(it.info.image) ? it.info.image : '';
+    const src = db || it.pic || it.avatar || it.photo || '';
+    if (src) {
+      const i = document.createElement('img'); i.alt = ''; i.loading = 'lazy'; i.referrerPolicy = 'no-referrer'; i.src = src;
+      i.onerror = () => { const fb = it.pic || it.avatar || it.photo; if (fb && i.src !== fb) i.src = fb; else i.replaceWith(codeNode(it, false)); };
+      pic.append(i);
+    } else { const n = codeNode(it, false); n.classList.add('tile-code'); pic.append(n); }
+    if (num) { const b = document.createElement('span'); b.className = 'tile-num'; b.textContent = num; pic.append(b); }
+    main.querySelector('.tile-name').textContent = it.name || 'Untitled';
+    const working = it.info && it.info.status === 'working';
+    main.querySelector('.tile-sub').textContent = working ? 'Identifying…' : it.info && it.info.price ? it.info.price.text : (it.format === 'PHOTO' ? 'Photo' : it.value);
+    main.addEventListener('click', () => openShow(it.id));
+    tile.append(main);
+    {
+      const del = document.createElement('button'); del.type = 'button'; del.className = 'tile-del';
       del.setAttribute('aria-label', 'Remove ' + (it.name || 'barcode'));
       del.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg>';
       del.addEventListener('click', () => {
@@ -549,9 +587,9 @@
         deleteItem(it);
         toastUndo('Removed “' + (it.name || 'barcode') + '”', () => saveItem(copy));
       });
-      row.append(itemCard(it), del);
-      l.append(row);
-    });
+      tile.append(del);
+    }
+    return tile;
   }
   $('#fvBack').addEventListener('click', closeFolderView);
   $('#fvScan').addEventListener('click', () => {
@@ -2352,8 +2390,8 @@
       price: pr, seenText: seen ? seen.text : '', t: Date.now()};
     if (!prod && !il && !seen && !clues) info.status = 'offline';   // try again later
     let av = null;
-    if (!it.avatar && lookFrame) { try { av = makeAvatar(lookFrame); } catch(e){} }
-    setInfo(it.id, info, av ? {avatar: av} : null);
+    if ((!it.avatar || !it.pic) && lookFrame) { try { av = {avatar: it.avatar || makeAvatar(lookFrame), pic: it.pic || makeAvatar(lookFrame, 256)}; } catch(e){} }
+    setInfo(it.id, info, av);
   }
 
   /* ---------- reading the printed numbers (for codes too blurry to scan) ---------- */
@@ -2672,7 +2710,7 @@
     try { photo = toCanvas(v, 760).toDataURL('image/jpeg', 0.72); } catch(e){}
     const it = {value: r.value, format: r.format, photo: photo, session: sessionId};
     it.name = defaultName(it) + (n > 1 ? ' (' + n + ')' : '');
-    try { it.avatar = makeAvatar(v); } catch(e){}
+    try { it.pic = makeAvatar(v, 256); it.avatar = makeAvatar(v); } catch(e){}
     it.autoName = true;
     saveItem(it);
     // frames for working out the product later: this one, the last few before it, and two after
@@ -2738,12 +2776,12 @@
   setTimeout(resumeStudies, 1500);
   // round pictures for barcodes saved before pictures existed (from their saved photo)
   setTimeout(async () => {
-    for (const it of items.filter(x => x.photo && !x.avatar).slice(0, 60)) {
+    for (const it of items.filter(x => x.photo && (!x.avatar || !x.pic)).slice(0, 60)) {
       const c = await photoCanvas(it.photo);
       if (!c) continue;
-      let av = ''; try { av = makeAvatar(c); } catch(e){}
+      let av = null; try { av = {avatar: it.avatar || makeAvatar(c), pic: it.pic || makeAvatar(c, 256)}; } catch(e){}
       const cur = items.find(x => x.id === it.id);
-      if (av && cur && !cur.avatar) saveItem(Object.assign({}, cur, {avatar: av}));
+      if (av && cur) saveItem(Object.assign({}, cur, av));
       await sleep(30);
     }
   }, 1200);

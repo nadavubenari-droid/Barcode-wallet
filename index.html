@@ -58,6 +58,7 @@
   #list,.stack{display:flex;flex-direction:column;gap:10px}
   #home[hidden]{display:none}
   #foldersWrap{margin-bottom:26px}
+  .keep-note{font-size:13px;color:var(--muted);margin:10px 4px 0}
   .folder-ic{width:52px;height:52px;flex:none;border-radius:14px;background:#ffe3d6;color:var(--accent);display:grid;place-items:center}
   .folder-ic svg{width:26px;height:26px}
   .count-badge{font:600 13px Inter;color:var(--muted);background:#efe8db;border-radius:99px;padding:3px 9px;white-space:nowrap}
@@ -177,7 +178,7 @@
   <input class="vh" id="picIn" type="file" accept="image/*" multiple>
 
   <div id="empty"><b>Nothing saved yet</b>Scan a loyalty card, ticket or coupon and it'll live here, ready to show.</div>
-  <div id="foldersWrap" hidden><p class="section-title">Scans</p><div id="folders" class="stack"></div></div>
+  <div id="foldersWrap" hidden><p class="section-title">Scans</p><div id="folders" class="stack"></div><p class="keep-note">Scans are deleted automatically after 7 days.</p></div>
   <div id="looseWrap" hidden><p class="section-title">Other saved codes</p><div id="list" class="stack"></div></div>
 </div>
 
@@ -1016,6 +1017,23 @@
 
   applyLocal();
   setMode('local');
+
+  /* ---------- auto-delete scan folders older than a week ---------- */
+  const KEEP_MS = 7 * 24 * 60 * 60 * 1000;
+  function purgeOld(){
+    const cutoff = Date.now() - KEEP_MS;
+    const old = folders().filter(f => f.last < cutoff);   // judged by the folder's last scan
+    if (!old.length) return;
+    const gone = new Set();
+    old.forEach(f => f.items.forEach(it => { gone.add(it.id); pending.delete(it.id); }));
+    items = items.filter(it => !gone.has(it.id));
+    lsSet(items);
+    if (openFolder !== null && !getFolder(openFolder)) closeFolderView();
+    render();
+  }
+  purgeOld();
+  setInterval(purgeOld, 60 * 60 * 1000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) purgeOld(); });
   if (rowEl.checked) startScanner();
 })();
 </script>

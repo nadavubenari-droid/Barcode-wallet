@@ -1107,8 +1107,11 @@
     stopTracks();
     const segs = videoSegs, marks = videoMarks;
     videoSegs = []; videoMarks = [];
-    if (marks.length) recEnding.then(() => studyVideo(segs.concat(videoSegs.splice(0)), marks));
-    else segs.length = 0;
+    if (marks.length) {
+      const ids = new Set(marks.map(m => m.id));
+      for (let i = queue.length - 1; i >= 0; i--) if (queue[i].prio === 2 && ids.has(queue[i].id) && recBytes > 0) queue.splice(i, 1);
+      recEnding.then(() => startStudy(segs.concat(videoSegs.splice(0)), marks));
+    } else segs.length = 0;
     $('#scan').hidden = true;
     if ($('#show').hidden && $('#backdrop').hidden) document.body.classList.remove('lock');
     const sid = sessionId, n = sessionCount, added = sessionResumed;
@@ -1701,13 +1704,27 @@
       sc.onload = res; sc.onerror = res; document.head.append(sc);
     });
   }
+  const lblFree = [], lblWaiters = [];
+  const LBL_WORKERS = (navigator.hardwareConcurrency || 2) >= 4 && (navigator.deviceMemory || 4) >= 4 ? 2 : 1;
   function loadLabelOCR(){
     if (!lblLoading) lblLoading = loadOCRScript().then(async () => {
       if (!window.Tesseract) return;
-      lblWorker = await Tesseract.createWorker(['heb', 'eng']);
-      try { await lblWorker.setParameters({tessedit_pageseg_mode: '6'}); } catch(e){}
+      for (let i = 0; i < LBL_WORKERS; i++) {
+        try {
+          const w = await Tesseract.createWorker(['heb', 'eng']);
+          try { await w.setParameters({tessedit_pageseg_mode: '6'}); } catch(e){}
+          if (!lblWorker) lblWorker = w;
+          lblFree.push(w);
+        } catch(e){ break; }
+      }
     }).catch(() => {});
     return lblLoading;
+  }
+  async function withLabelWorker(fn){
+    if (!lblFree.length) await new Promise(r => lblWaiters.push(r));
+    const w = lblFree.pop();
+    try { return await fn(w); }
+    finally { lblFree.push(w); const next = lblWaiters.shift(); if (next) next(); }
   }
   function wordsOf(data){
     if (data.words && data.words.length) return data.words;
@@ -1729,7 +1746,8 @@
     return m ? (m[1].replace(',', '.') + ' ' + m[2]) : '';
   }
   async function readPackage(canvas){
-    const res = await lblWorker.recognize(enhance(canvas, 0), {}, {blocks: true, text: true});
+    const img = enhance(canvas, 0);
+    const res = await withLabelWorker(w => w.recognize(img, {}, {blocks: true, text: true}));
     const data = (res && res.data) || {};
     // keep real-looking words: Hebrew words, or confident Latin words with a vowel (drops OCR junk like "Ww")
     const words = wordsOf(data).filter(w => w && w.text && w.bbox && (
@@ -1805,7 +1823,55 @@
     if (!b) { b = document.createElement('div'); b.id = 'studyBar'; document.body.append(b); }
     b.textContent = text; b.hidden = !text;
   }
-  function analyzeAndWait(job){ return new Promise(res => { job.onDone = res; analyzeLater(job); }); }
+  function analyzeAndWait(job){ return new Promise(res => { job.onDone = res; job.prio = 1; analyzeLater(job); }); }
+  // a study survives the phone pausing or closing the app: it is kept (temporarily) on the phone
+  // and picked up the next time the app opens, then deleted with the video
+  const TMP_DB = 'barcode-wallet-tmp';
+  function tmpDb(){
+    return new Promise((res, rej) => {
+      const r = indexedDB.open(TMP_DB, 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('study');
+      r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+    });
+  }
+  async function tmpDo(mode, fn){
+    const db = await tmpDb();
+    return new Promise((res, rej) => {
+      const tx = db.transaction('study', mode); const st = tx.objectStore('study');
+      let out; const req = fn(st); if (req) req.onsuccess = () => { out = req.result; };
+      tx.oncomplete = () => res(out); tx.onerror = () => rej(tx.error);
+    });
+  }
+  let studyChain = Promise.resolve(), studyWake = null, studying = 0;
+  function keepAwakeStudy(){
+    try { if (studying && !document.hidden && 'wakeLock' in navigator && !studyWake) navigator.wakeLock.request('screen').then(w => { studyWake = w; w.onrelease = () => { studyWake = null; }; }).catch(() => {}); } catch(e){}
+  }
+  document.addEventListener('visibilitychange', keepAwakeStudy);
+  function startStudy(segs, marks, key){
+    key = key || 'study-' + Date.now();
+    if (!key.startsWith('resume')) tmpDo('readwrite', st => st.put({segs: segs.map(sg => ({blob: sg.blob, start: sg.start, end: sg.end})), marks: marks}, key)).catch(() => {});
+    studyChain = studyChain.then(async () => {
+      studying++; keepAwakeStudy();
+      try { await studyVideo(segs, marks); }
+      finally {
+        studying--;
+        if (!studying && studyWake) { try { studyWake.release(); } catch(e){} studyWake = null; }
+        tmpDo('readwrite', st => st.delete(key.replace(/^resume:/, ''))).catch(() => {});
+      }
+    });
+  }
+  async function resumeStudies(){
+    try {
+      const keys = await tmpDo('readonly', st => st.getAllKeys());
+      for (const k of keys || []) {
+        const saved = await tmpDo('readonly', st => st.get(k));
+        const marks = (saved && saved.marks || []).filter(m => items.some(x => x.id === m.id));
+        if (!saved || !marks.length || !saved.segs || !saved.segs.length) { await tmpDo('readwrite', st => st.delete(k)); continue; }
+        // times were recorded against the old page's clock; keep them relative to each piece
+        startStudy(saved.segs, marks, 'resume:' + k);
+      }
+    } catch(e){}
+  }
   async function studyVideo(segs, marks){
     if (!segs.length || !marks.length) return;
     const total = marks.length;
@@ -1826,13 +1892,16 @@
           ];
           for (let p = 0; p < passes.length; p++) {
             const pass = passes[p];
+            const waits = [];
             for (let i = 0; i < here.length; i++) {
               const m = here[i];
               if (!items.find(x => x.id === m.id) || !pass.only(m)) continue;
               studyBar('🎞 Studying the scan video — ' + pass.label + ' (' + (marks.findIndex(x => x.id === m.id) + 1) + ' of ' + total + ')');
               const frames = pass.pick(await grabFrames(v, pass.times(m, i))).map(f => f.c);
-              if (frames.length) await analyzeAndWait({id: m.id, frames: frames, keepOld: true});
+              // reading runs while the next product's frames are being pulled out of the video
+              if (frames.length) waits.push(analyzeAndWait({id: m.id, frames: frames, keepOld: true}));
             }
+            await Promise.all(waits);
           }
         } finally {
           v.removeAttribute('src'); try { v.load(); } catch(e){}
@@ -1847,23 +1916,40 @@
     }
   }
   // ----- the queue -----
+  // prio 0 = quick barcode lookup, 1 = video study, 2 = live frames / photos, 3 = re-checks
   const queue = [];
-  let analyzing = false;
+  let running = 0;
+  const MAX_RUNNING = 2;
+  const busyIds = new Set();
   function analyzeLater(job){
+    if (job.prio === undefined) job.prio = job.frames || job.photo ? 2 : 3;
     queue.push(job);
     // only the most recent few keep their camera frames, to save memory
-    queue.slice(0, -5).forEach(j => { if (!j.onDone) { j.frames = []; j.photo = null; } });
+    queue.filter(j => j.prio >= 2).slice(0, -5).forEach(j => { j.frames = []; j.photo = null; });
     pump();
   }
-  async function pump(){
-    if (analyzing) return;
-    const job = queue.shift();
-    if (!job) return;
-    analyzing = true;
-    try { await analyze(job); } catch(e){}
-    try { if (job.onDone) job.onDone(); } catch(e){}
-    analyzing = false;
-    setTimeout(pump, 30);
+  function pump(){
+    while (running < MAX_RUNNING && queue.length) {
+      // highest priority first; never two jobs for the same product at once
+      let bi = -1;
+      queue.forEach((j, i) => { if (!busyIds.has(j.id) && (bi < 0 || j.prio < queue[bi].prio)) bi = i; });
+      if (bi < 0) return;
+      const job = queue.splice(bi, 1)[0];
+      running++; busyIds.add(job.id);
+      (async () => {
+        try { await analyze(job); } catch(e){}
+        try { if (job.onDone) job.onDone(); } catch(e){}
+        running--; busyIds.delete(job.id);
+        setTimeout(pump, 10);
+      })();
+    }
+  }
+  const prefetched = new Map();
+  function prefetch(code){
+    if (!isGtin(code) || prefetched.has(code)) return;
+    const c = infoCache[code];
+    if (c && c.il !== undefined && c.t > Date.now() - 3 * 864e5) return;
+    prefetched.set(code, Promise.all([lookupProduct(code), lookupPrice(code), lookupIL(code)]));
   }
   // scanning first: wait while barcodes are being read
   async function waitQuiet(){
@@ -1904,7 +1990,8 @@
       const c = infoCache[code];
       if (c && c.il !== undefined && c.t > Date.now() - 3 * 864e5) { prod = c.prod; price = c.price; il = c.il; }
       else {
-        [prod, price, il] = await Promise.all([lookupProduct(code), lookupPrice(code), lookupIL(code)]);
+        const pre = prefetched.get(code); prefetched.delete(code);
+        [prod, price, il] = await (pre || Promise.all([lookupProduct(code), lookupPrice(code), lookupIL(code)]));
         if (prod && price && il) { infoCache[code] = {prod: prod, price: price, il: il, t: Date.now()}; saveInfoCache(); }
       }
     }
@@ -2336,7 +2423,10 @@
     try { job.frames = [toCanvas(v, 960)].concat(frameBuf.slice().reverse()); } catch(e){}
     setTimeout(() => { if (scanning && job.frames) try { job.frames.splice(1, 0, toCanvas($('#vid'), 960)); } catch(e){} }, 450);
     setTimeout(() => { if (scanning && job.frames) try { job.frames.splice(2, 0, toCanvas($('#vid'), 960)); } catch(e){} }, 900);
-    analyzeLater(job);
+    prefetch(it.value);
+    analyzeLater({id: it.id, prio: 0});      // quick label from the barcode databases
+    job.prio = 2; job.session = sessionId;
+    analyzeLater(job);                        // then the camera frames
     videoMarks.push({id: it.id, t: performance.now()});
     sessionCount++;
     $('#scanCount').textContent = sessionCount + ' saved';
@@ -2388,6 +2478,7 @@
   setInterval(purgeOld, 60 * 60 * 1000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) purgeOld(); });
   unlockAudio();   // works straight away wherever the browser allows sound without a tap
+  setTimeout(resumeStudies, 1500);
   try { if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {}); } catch(e){}
   if (rowEl.checked) startScanner();
   setTimeout(() => {

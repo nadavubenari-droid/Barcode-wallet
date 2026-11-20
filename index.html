@@ -622,7 +622,7 @@
 
   /* ---------- reel mode ---------- */
   const REEL_MS = 500;
-  let reelT = null, reelIdx = -1, reelPaused = false, reelSlides = [], wakeLock = null;
+  let reelT = null, reelIdx = -1, reelPaused = false, reelDone = false, reelSlides = [], wakeLock = null;
   function keepAwake(){
     try { if ('wakeLock' in navigator) navigator.wakeLock.request('screen').then(w => wakeLock = w).catch(() => {}); } catch(e){}
   }
@@ -636,7 +636,7 @@
       stage.append(d);
       return {el: d, it: it};
     });
-    reelIdx = -1; reelPaused = false;
+    reelIdx = -1; reelPaused = false; reelDone = false;
     $('#reelPause').textContent = 'Pause';
     $('#reel').hidden = false; document.body.classList.add('lock');
     keepAwake();
@@ -651,13 +651,29 @@
     s.el.classList.add('on');
     $('#reelCount').textContent = (reelIdx + 1) + ' / ' + reelSlides.length;
     $('#reelName').textContent = s.it.name || '';
-    if (!reelPaused && reelSlides.length > 1) reelT = setTimeout(() => reelGo(1), REEL_MS);
+    scheduleNext();
+  }
+  function scheduleNext(){
+    clearTimeout(reelT);
+    if (reelPaused) return;
+    if (reelIdx >= reelSlides.length - 1) { reelFinished(); return; }
+    reelT = setTimeout(() => reelGo(1), REEL_MS);
+  }
+  function reelFinished(){
+    reelDone = true; reelPaused = true;
+    $('#reelPause').textContent = 'Play again';
   }
   function setReelPaused(p){
+    if (!p && reelDone) {            // finished: start over from the first one
+      reelDone = false; reelPaused = false;
+      $('#reelPause').textContent = 'Pause';
+      if (reelIdx >= 0) reelSlides[reelIdx].el.classList.remove('on');
+      reelIdx = -1; reelGo(1);
+      return;
+    }
     reelPaused = p;
     $('#reelPause').textContent = p ? 'Play' : 'Pause';
-    clearTimeout(reelT);
-    if (!p && reelSlides.length > 1) reelT = setTimeout(() => reelGo(1), REEL_MS);
+    if (p) clearTimeout(reelT); else scheduleNext();
   }
   function closeReel(){
     clearTimeout(reelT); reelSlides = []; $('#reelStage').textContent = '';
@@ -670,8 +686,8 @@
   $('#reelDone').addEventListener('click', closeReel);
   $('#reelPause').addEventListener('click', () => setReelPaused(!reelPaused));
   $('#reelStage').addEventListener('click', () => setReelPaused(!reelPaused));
-  $('#reelPrev').addEventListener('click', () => { setReelPaused(true); reelGo(-1); });
-  $('#reelNext').addEventListener('click', () => { setReelPaused(true); reelGo(1); });
+  $('#reelPrev').addEventListener('click', () => { if (!reelDone) setReelPaused(true); reelGo(-1); });
+  $('#reelNext').addEventListener('click', () => { if (!reelDone) setReelPaused(true); reelGo(1); });
   document.addEventListener('visibilitychange', () => { if (!document.hidden && !$('#reel').hidden) keepAwake(); });
   function openCamera(){ try { $('#camIn').click(); } catch(e){ toast("Couldn't open the camera"); } }
   $('#camBtn').addEventListener('click', () => { unlockAudio(); startScanner(); });

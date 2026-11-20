@@ -179,6 +179,13 @@
   #reelPrev,#reelNext{font-size:22px;padding:8px 20px}
   #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(20px);background:var(--ink);color:#fff;padding:11px 18px;border-radius:12px;font-size:14px;font-weight:500;opacity:0;pointer-events:none;transition:.2s;z-index:40;max-width:90vw;text-align:center}
   #toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+  #toast.act{pointer-events:auto}
+  .toast-btn{background:none;border:0;color:#ffb38f;font-weight:700;font-size:14px;margin-left:12px;padding:2px 4px}
+  .btn.half{grid-column:auto}
+  .card-row{display:flex;gap:8px;align-items:stretch}
+  .card-row .card{flex:1;min-width:0}
+  .del-btn{flex:none;width:48px;border:1px solid #efc9c1;background:#fff5f2;color:var(--danger);border-radius:var(--radius);display:grid;place-items:center}
+  .del-btn svg{width:20px;height:20px}
   @keyframes spin{to{transform:rotate(360deg)}}
   @keyframes fade{from{opacity:0}}
   @keyframes up{from{transform:translateY(30px);opacity:.5}}
@@ -219,7 +226,8 @@
     <h2 class="fv-title" id="fvTitle"></h2>
     <p class="fv-sub" id="fvSub"></p>
     <div class="actions">
-      <button class="btn reel-btn" id="fvReel" type="button"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10.5-6.5z"/></svg>Reel mode</button>
+      <button class="btn reel-btn half" id="fvReel" type="button"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10.5-6.5z"/></svg>Reel mode</button>
+      <button class="btn primary half" id="fvScan" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>Scan more</button>
     </div>
     <div id="fvList" class="stack"></div>
     <button class="btn danger fv-del" id="fvDelete" type="button">Delete this folder</button>
@@ -414,8 +422,8 @@
   function folders(){
     const map = new Map();
     for (const it of items) if (it.session) {
-      const f = map.get(it.session) || {id: it.session, items: [], last: 0};
-      f.items.push(it); f.last = Math.max(f.last, it.created || 0);
+      const f = map.get(it.session) || {id: it.session, items: [], last: 0, first: Infinity};
+      f.items.push(it); f.last = Math.max(f.last, it.created || 0); f.first = Math.min(f.first, it.created || f.first);
       map.set(it.session, f);
     }
     const list = [...map.values()];
@@ -443,7 +451,7 @@
       const b = document.createElement('button');
       b.type = 'button'; b.className = 'card';
       b.innerHTML = '<div class="folder-ic">' + FOLDER_SVG + '</div><div class="meta"><div class="name"></div></div><span class="count-badge"></span><span class="chev">›</span>';
-      b.querySelector('.name').textContent = folderName(f.last);
+      b.querySelector('.name').textContent = folderName(f.first);
       b.querySelector('.count-badge').textContent = f.items.length;
       b.addEventListener('click', () => openFolderView(f.id));
       fl.append(b);
@@ -472,12 +480,30 @@
   function drawFolder(){
     const f = getFolder(openFolder);
     if (!f) { closeFolderView(); return; }
-    $('#fvTitle').textContent = folderName(f.last);
+    $('#fvTitle').textContent = folderName(f.first);
     $('#fvSub').textContent = plural(f.items.length) + ', in the order you scanned them';
     const l = $('#fvList'); l.textContent = '';
-    f.items.forEach(it => l.append(itemCard(it)));
+    f.items.forEach(it => {
+      const row = document.createElement('div'); row.className = 'card-row';
+      const del = document.createElement('button'); del.type = 'button'; del.className = 'del-btn';
+      del.setAttribute('aria-label', 'Remove ' + (it.name || 'barcode'));
+      del.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></svg>';
+      del.addEventListener('click', () => {
+        const copy = Object.assign({}, it);
+        deleteItem(it);
+        toastUndo('Removed “' + (it.name || 'barcode') + '”', () => saveItem(copy));
+      });
+      row.append(itemCard(it), del);
+      l.append(row);
+    });
   }
   $('#fvBack').addEventListener('click', closeFolderView);
+  $('#fvScan').addEventListener('click', () => {
+    const f = getFolder(openFolder); if (!f) return;
+    resumeSession(f);
+    unlockAudio();
+    startScanner();
+  });
   $('#fvReel').addEventListener('click', () => { const f = getFolder(openFolder); if (f) openReel(f.items); });
   $('#fvDelete').addEventListener('click', () => {
     const f = getFolder(openFolder); if (!f) return;
@@ -487,7 +513,7 @@
         for (const it of f.items) await deleteItem(it);
         toast('Folder deleted');
       }},
-      el => el.querySelector('.m').textContent = 'All ' + plural(f.items.length) + ' from ' + folderName(f.last) + " will be deleted. This can't be undone.");
+      el => el.querySelector('.m').textContent = 'All ' + plural(f.items.length) + ' from ' + folderName(f.first) + " will be deleted. This can't be undone.");
   });
 
   /* ---------- show overlay ---------- */
@@ -928,7 +954,7 @@
 
   /* ---------- live scanner ---------- */
   let stream = null, scanning = false, loopT = null, busy = false, detector = null, zxReader = null, zxHints = null;
-  let sessionId = null, sessionVals = new Map(), lastVal = '', scanSig = null, cleared = true, clearStart = 0, lastSeen = 0, cand = '', candN = 0, sessionCount = 0, resumeLater = false, torchOn = false, audioCtx = null;
+  let sessionId = null, sessionResumed = false, sessionVals = new Map(), lastVal = '', scanSig = null, cleared = true, clearStart = 0, lastSeen = 0, cand = '', candN = 0, sessionCount = 0, resumeLater = false, torchOn = false, audioCtx = null;
   const setMsg = t => { $('#scanMsg').textContent = t; };
 
   function soundReady(){ return !!audioCtx && audioCtx.state === 'running'; }
@@ -1005,6 +1031,13 @@
     updateSoundChip();
     loop();
   }
+  // carry on an earlier scan: new barcodes go into that folder, repeats keep counting (2), (3)…
+  function resumeSession(f){
+    sessionId = f.id; sessionResumed = true;
+    sessionVals = new Map();
+    f.items.forEach(it => sessionVals.set(it.value, (sessionVals.get(it.value) || 0) + 1));
+    lastVal = ''; scanSig = null; cleared = true; clearStart = 0;
+  }
   function stopTracks(){
     scanning = false; clearTimeout(loopT); clearInterval(sceneT); clearInterval(ocrT);
     try { boxCv.getContext('2d').clearRect(0, 0, boxCv.width, boxCv.height); } catch(e){}
@@ -1015,13 +1048,13 @@
     stopTracks();
     $('#scan').hidden = true;
     if ($('#show').hidden && $('#backdrop').hidden) document.body.classList.remove('lock');
-    const sid = sessionId, n = sessionCount;
-    sessionCount = 0; sessionId = null;
+    const sid = sessionId, n = sessionCount, added = sessionResumed;
+    sessionCount = 0; sessionId = null; sessionResumed = false;
+    const f = getFolder(sid);
     if (n) {
-      const f = getFolder(sid);
-      if (f) { openFolderView(sid); toast(plural(n) + ' saved to ' + folderName(f.last)); }
+      if (f) { openFolderView(sid); toast(plural(n) + (added ? ' added to ' : ' saved to ') + folderName(f.first)); }
       else toast(plural(n) + ' saved');
-    }
+    } else if (added && f) openFolderView(sid);
   }
   function camError(msg){
     stopTracks(); $('#scan').hidden = true;
@@ -1811,7 +1844,14 @@
 
   /* ---------- toast ---------- */
   let tt;
-  function toast(msg){ const t = $('#toast'); t.textContent = msg; t.classList.add('on'); clearTimeout(tt); tt = setTimeout(() => t.classList.remove('on'), 2200); }
+  function toast(msg){ const t = $('#toast'); t.textContent = msg; t.classList.remove('act'); t.classList.add('on'); clearTimeout(tt); tt = setTimeout(() => t.classList.remove('on'), 2200); }
+  function toastUndo(msg, undo){
+    const t = $('#toast'); t.textContent = msg;
+    const b = document.createElement('button'); b.type = 'button'; b.className = 'toast-btn'; b.textContent = 'Undo';
+    b.addEventListener('click', () => { undo(); t.classList.remove('on', 'act'); clearTimeout(tt); });
+    t.append(b); t.classList.add('on', 'act');
+    clearTimeout(tt); tt = setTimeout(() => t.classList.remove('on', 'act'), 5000);
+  }
 
   applyLocal();
   setMode('local');

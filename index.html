@@ -950,7 +950,7 @@
     loopT = setTimeout(loop, 150);
   }
   // The same barcode counts again once it has been out of view for this long
-  const REAPPEAR_MS = 500;
+  const REAPPEAR_MS = 800;
   function onCode(r, v){
     const now = Date.now();
     // still the same barcode being held in view: not a new scan

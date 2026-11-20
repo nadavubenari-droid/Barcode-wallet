@@ -10,9 +10,27 @@ import collections, datetime, gzip, io, json, os, re, statistics, sys, zipfile
 
 from lxml import etree
 
-CHAINS = ["SHUFERSAL", "RAMI_LEVY", "YOHANANOF", "OSHER_AD", "TIV_TAAM", "KING_STORE",
-          "KESHET", "SUPER_YUDA", "STOP_MARKET", "POLIZER", "DOR_ALON", "SALACH_DABACH"]
-FILES_PER_CHAIN = int(os.environ.get("FILES_PER_CHAIN", "6"))
+# Every chain whose price lists can be downloaded from outside Israel (GitHub's runners are in the US).
+# Super-Pharm, Victory, Carrefour/Yeinot Bitan, Hazi Hinam, Netiv Hesed, Het Cohen and Mahsani Ashuk
+# block foreign downloads, so they are not here.
+CHAINS = ["SHUFERSAL", "RAMI_LEVY", "YOHANANOF", "OSHER_AD", "TIV_TAAM", "KING_STORE", "KESHET",
+          "SUPER_YUDA", "STOP_MARKET", "POLIZER", "DOR_ALON", "SALACH_DABACH", "GOOD_PHARM",
+          "BAREKET", "CITY_MARKET_KIRYATGAT", "CITY_MARKET_SHOPS", "FRESH_MARKET_AND_SUPER_DOSH",
+          "MAAYAN_2000", "MESHMAT_YOSEF_2", "SHEFA_BARCART_ASHEM", "SHUK_AHIR", "SUPER_SAPIR",
+          "WOLT", "YELLOW", "ZOL_VEBEGADOL"]
+# download folder -> (one-letter code used in the data, name shown in the app)
+CHAIN_INFO = {
+    "Shufersal": ("a", "שופרסל / BE"), "RamiLevy": ("b", "רמי לוי"), "Yohananof": ("c", "יוחננוף"),
+    "Osherad": ("d", "אושר עד"), "TivTaam": ("e", "טיב טעם"), "KingStore": ("f", "קינג סטור"),
+    "Keshet": ("g", "קשת טעמים"), "SuperYuda": ("h", "סופר יודה"), "StopMarket": ("i", "סטופ מרקט"),
+    "Polizer": ("j", "פוליצר"), "DorAlon": ("k", "דור אלון / אלונית"), "SalachDabach": ("l", "סאלח דבאח"),
+    "GoodPharm": ("m", "גוד פארם"), "Bareket": ("n", "ברקת"), "CityMarketKiryatGat": ("o", "סיטי מרקט"),
+    "CityMarketShops": ("o", "סיטי מרקט"), "FreshMarketAndSuperDosh": ("p", "פרשמרקט / סופר דוש"),
+    "Maayan2000": ("q", "מעיין 2000"), "MeshnatYosef2": ("r", "משנת יוסף"), "ShefaBarcartAshem": ("s", "שפע ברכת השם"),
+    "ShukAhir": ("t", "שוק העיר"), "SuperSapir": ("u", "סופר ספיר"), "Wolt": ("v", "וולט מרקט"),
+    "Yellow": ("w", "יילו (פז)"), "ZolVeBegadol": ("x", "זול ובגדול"),
+}
+FILES_PER_CHAIN = int(os.environ.get("FILES_PER_CHAIN", "25"))
 DUMPS = "dumps"
 OUT = "out"
 
@@ -22,13 +40,85 @@ def download():
     task = ScarpingTask(
         enabled_scrapers=CHAINS,
         files_types=["PRICE_FULL_FILE"],
-        multiprocessing=4,
+        multiprocessing=6,
         output_configuration={"output_mode": "disk", "base_storage_path": DUMPS},
         status_configuration={"database_type": "json", "base_path": os.path.join(DUMPS, "status")},
-        timeout_in_seconds=60 * 25,
+        timeout_in_seconds=60 * 30,
     )
     task.start(limit=FILES_PER_CHAIN)
     task.join()
+
+
+# ---- medicines sold without a prescription, from the Ministry of Health registry ----
+REGISTRY = "https://registries.health.gov.il/api/Medicines/GetMedicines"
+
+
+def fetch_medicines():
+    """Registrations whose packs need no prescription (otcOnly) or may be sold outside a
+    pharmacy (telemOnly). A few dozen gentle requests a day."""
+    import time
+    import requests
+    s = requests.Session()
+    s.headers.update({"Content-Type": "application/json", "Accept": "application/json",
+                      "Origin": "https://registries.health.gov.il", "Referer": "https://registries.health.gov.il/Medicines",
+                      "User-Agent": "Mozilla/5.0 (Barcode Wallet daily product list)"})
+    out = {}
+    for flt, kind in (("telemOnly", "gsl"), ("otcOnly", "otc")):
+        page, total = 0, None
+        while total is None or page * 100 < total:
+            body = {"searchText": "", "pageNumber": page, "maxResult": 100, "sortBy": "tradeNameHeb",
+                    "sortDirection": "asc", "includeActive": True, "includeCanceled": False, flt: True}
+            try:
+                r = s.post(REGISTRY, json=body, timeout=60).json()
+            except Exception as e:  # noqa: BLE001
+                print("medicines:", flt, "page", page, e)
+                break
+            if not isinstance(r, dict) or r.get("statusCode") != 200 or not r.get("returnObject"):
+                print("medicines: unexpected answer", str(r)[:200])
+                break
+            ro = r["returnObject"]
+            total = int(ro.get("totalRows") or 0)
+            for m in ro.get("medicinesList") or []:
+                add_medicine(m, kind, out)
+            page += 1
+            if page > 120:
+                break
+            time.sleep(1)
+        print(f"medicines {flt}: {total} registrations, {len(out)} barcodes so far")
+    return out
+
+
+def barcodes_in(obj):
+    found = set()
+    for k, v in (obj or {}).items():
+        if re.search(r"barc|bark", k, re.I) and v:
+            for c in re.findall(r"\d{8,14}", str(v)):
+                found.add(c)
+    return found
+
+
+def add_medicine(m, kind, out):
+    name = (m.get("tradeNameHeb") or m.get("tradeName") or "").strip()
+    eng = (m.get("tradeName") or "").strip()
+    maker = (m.get("ownerName") or m.get("manufacturerName") or "").strip()
+    comps = ", ".join(filter(None, [((c.get("componentDesc") or "") + " " + (c.get("dosage") or "")).strip()
+                                    for c in (m.get("components") or [])]))
+    form = (m.get("dosageFormHeb") or m.get("dosageFormE") or "").strip()
+    rec_codes = barcodes_in(m)
+    packs = m.get("packages") or []
+    for p in packs:
+        if p.get("mirsham") not in (0, "0", None):
+            continue
+        codes = barcodes_in(p) or (rec_codes if len(packs) == 1 else set())
+        size = (p.get("packageDesc") or p.get("packDesc") or p.get("packageName") or "").strip()
+        price = p.get("customerPriceWithTax") or 0
+        for c in codes:
+            out[c] = {"name": name if not eng or eng.lower() in name.lower() else f"{name} ({eng})",
+                      "maker": maker, "size": size or form, "price": float(price) if price else None,
+                      "kind": kind, "extra": comps}
+    if not packs:
+        for c in rec_codes:
+            out[c] = {"name": name, "maker": maker, "size": form, "price": None, "kind": kind, "extra": comps}
 
 
 def read_bytes(path):
@@ -148,7 +238,7 @@ def parse(chain, path, acc):
                 rec["prices"].append(p)
         except ValueError:
             pass
-        rec["chains"].add(chain)
+        rec["chains"].add(CHAIN_INFO.get(chain, ("?", chain))[0])
         n += 1
     return n
 
@@ -173,7 +263,13 @@ def main():
             print(f"{chain}/{fn}: {n} items")
             if n:
                 chains_seen.add(chain)
-    if not acc:
+    meds = {}
+    if "--no-download" not in sys.argv:
+        try:
+            meds = fetch_medicines()
+        except Exception as e:  # noqa: BLE001
+            print("medicines error:", e)
+    if not acc and not meds:
         print("No products parsed")
         sys.exit(1)
     shards = collections.defaultdict(dict)
@@ -189,7 +285,19 @@ def main():
             round(pr[-1], 2) if pr else None,
             round(statistics.median(pr), 2) if pr else None,
             len(r["chains"]),
+            "".join(sorted(r["chains"])),
+            "", "",
         ]
+    for code, m in meds.items():
+        code = code.lstrip("0").zfill(13) if len(code) > 13 else code
+        row = shards[code[-2:]].get(code)
+        if row:   # sold in the chains too: keep their name and prices, add the medicine facts
+            row[8], row[9] = m["kind"], m["extra"]
+            if not row[1]:
+                row[1] = m["maker"]
+        else:
+            pr = m["price"]
+            shards[code[-2:]][code] = [m["name"], m["maker"], m["size"], pr, pr, pr, 0, "", m["kind"], m["extra"]]
     os.makedirs(os.path.join(OUT, "p"), exist_ok=True)
     write_index({c: row for sh in shards.values() for c, row in sh.items()})
     total = 0
@@ -198,7 +306,12 @@ def main():
         with open(os.path.join(OUT, "p", f"{k}.json"), "w", encoding="utf-8") as fh:
             json.dump(v, fh, ensure_ascii=False, separators=(",", ":"))
     with open(os.path.join(OUT, "meta.json"), "w", encoding="utf-8") as fh:
-        json.dump({"updated": datetime.date.today().isoformat(), "products": total, "chains": sorted(chains_seen)}, fh, ensure_ascii=False)
+        names = {}
+        for folder in chains_seen:
+            letter, title = CHAIN_INFO.get(folder, ("?", folder))
+            names[letter] = title
+        json.dump({"updated": datetime.date.today().isoformat(), "products": total, "medicines": len(meds),
+                   "chains": names}, fh, ensure_ascii=False)
     print(f"Wrote {total} products from {len(chains_seen)} chains")
 
 

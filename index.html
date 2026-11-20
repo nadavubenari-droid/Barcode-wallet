@@ -175,6 +175,7 @@
   <div class="scan-top">
     <span id="scanCount" class="chip">0 saved</span>
     <span class="grow"></span>
+    <button id="soundBtn" class="chip on" type="button" hidden>🔇 Tap for sound</button>
     <button id="torchBtn" class="chip" type="button" hidden>Light</button>
     <button id="scanDone" class="chip strong" type="button">Done</button>
   </div>
@@ -491,7 +492,7 @@
     try { photo = toCanvas(img, 760).toDataURL('image/jpeg', 0.72); } catch(e){}
     let found = null;
     try { found = await decode(img); } catch(e){}
-    if (found) reviewSheet({value: found.value, format: found.format, photo: photo}, 'Found it');
+    if (found) { beep(isDup(found.value) ? 'dup' : 'ok'); reviewSheet({value: found.value, format: found.format, photo: photo}, 'Found it'); }
     else failSheet(photo);
   }
   /* ---------- scan in a row ---------- */
@@ -697,23 +698,41 @@
   let lastVal = '', lastSeen = 0, cand = '', candN = 0, sessionCount = 0, resumeLater = false, torchOn = false, audioCtx = null;
   const setMsg = t => { $('#scanMsg').textContent = t; };
 
+  function soundReady(){ return !!audioCtx && audioCtx.state === 'running'; }
+  function updateSoundChip(){ $('#soundBtn').hidden = soundReady() || $('#scan').hidden; }
   function unlockAudio(){
     try {
-      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      if (audioCtx.state === 'suspended') audioCtx.resume();
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        audioCtx.onstatechange = updateSoundChip;
+      }
+      if (audioCtx.state !== 'running') {
+        // a silent blip, played inside the tap, is what wakes sound up on iPhones
+        const b = audioCtx.createBuffer(1, 1, 22050), src = audioCtx.createBufferSource();
+        src.buffer = b; src.connect(audioCtx.destination); src.start(0);
+        const r = audioCtx.resume(); if (r && r.then) r.then(updateSoundChip, () => {});
+      }
     } catch(e){}
+    updateSoundChip();
   }
-  function beep(){
+  // kind: 'ok' = new code saved, 'dup' = already saved
+  function beep(kind){
     try {
-      if (!audioCtx || audioCtx.state !== 'running') return;
-      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
-      o.frequency.value = 1320; o.type = 'sine';
-      g.gain.setValueAtTime(0.0001, audioCtx.currentTime);
-      g.gain.exponentialRampToValueAtTime(0.25, audioCtx.currentTime + 0.01);
-      g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.14);
-      o.connect(g).connect(audioCtx.destination); o.start(); o.stop(audioCtx.currentTime + 0.15);
+      if (!soundReady()) return;
+      const t = audioCtx.currentTime, dup = kind === 'dup';
+      const tones = dup ? [[0, 880], [0.16, 880]] : [[0, 2300]];
+      for (const [at, hz] of tones) {
+        const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+        o.type = 'square'; o.frequency.value = hz;
+        g.gain.setValueAtTime(0.0001, t + at);
+        g.gain.exponentialRampToValueAtTime(0.35, t + at + 0.008);
+        g.gain.setValueAtTime(0.35, t + at + 0.09);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + at + 0.12);
+        o.connect(g).connect(audioCtx.destination); o.start(t + at); o.stop(t + at + 0.13);
+      }
     } catch(e){}
   }
+  $('#soundBtn').addEventListener('click', e => { e.stopPropagation(); unlockAudio(); beep('ok'); });
   function flash(kind){
     const r = $('#reticle'); r.classList.remove('ok', 'dup'); void r.offsetWidth; r.classList.add(kind);
     setTimeout(() => r.classList.remove(kind), 700);
@@ -738,6 +757,7 @@
     if (!detector && 'BarcodeDetector' in window) { try { detector = new BarcodeDetector(); } catch(e){ detector = null; } }
     scanning = true; cand = ''; candN = 0;
     setMsg('Point at a barcode');
+    updateSoundChip();
     loop();
   }
   function stopTracks(){
@@ -820,7 +840,7 @@
     if (r.value === lastVal && now - lastSeen < 4000) { lastSeen = now; return; }
     lastVal = r.value; lastSeen = now;
     const dup = items.find(x => x.value === r.value && x.format !== 'PHOTO');
-    if (dup) { setMsg('Already saved: ' + (dup.name || 'Untitled')); flash('dup'); return; }
+    if (dup) { setMsg('Already saved: ' + (dup.name || 'Untitled')); flash('dup'); beep('dup'); return; }
     let photo = null;
     try { photo = toCanvas(v, 760).toDataURL('image/jpeg', 0.72); } catch(e){}
     const it = {value: r.value, format: r.format, photo: photo};
@@ -829,14 +849,14 @@
     sessionCount++;
     $('#scanCount').textContent = sessionCount + ' saved';
     setMsg('Saved ' + fmtLabel(r.format) + ' · ' + r.value);
-    flash('ok'); beep();
+    flash('ok'); beep('ok');
     try { if (navigator.vibrate) navigator.vibrate(70); } catch(e){}
   }
   document.addEventListener('visibilitychange', () => {
     if (document.hidden && scanning) { resumeLater = true; stopTracks(); }
     else if (!document.hidden && resumeLater) { resumeLater = false; startScanner(); }
   });
-  document.addEventListener('pointerdown', unlockAudio, {once: true});
+  for (const ev of ['pointerdown', 'touchend', 'click', 'keydown']) document.addEventListener(ev, () => { if (!soundReady()) unlockAudio(); }, {passive: true, capture: true});
   $('#picBtn').addEventListener('click', () => { try { $('#picIn').click(); } catch(e){} });
 
   /* ---------- toast ---------- */

@@ -1227,7 +1227,7 @@
     return 'Camera ' + (i + 1);
   }
   function getStream(deviceId){
-    const video = {width: {ideal: 1920}, height: {ideal: 1080}};
+    const video = {width: {ideal: 1280}, height: {ideal: 720}};   // HD is plenty for barcodes and much lighter than full HD
     if (deviceId) video.deviceId = {exact: deviceId}; else video.facingMode = {ideal: 'environment'};
     return navigator.mediaDevices.getUserMedia({audio: false, video: video});
   }
@@ -2584,7 +2584,7 @@
       if (Date.now() - lastBufAt > 400) { lastBufAt = Date.now(); try { frameBuf.push(toCanvas(v, 960)); if (frameBuf.length > 3) frameBuf.shift(); } catch(e){} }
       busy = false;
     }
-    loopT = setTimeout(loop, 15);
+    loopT = setTimeout(loop, 60);   // a short breather between checks saves battery; still ~10+ checks a second
   }
   /* "Is the product gone?" — a tiny greyscale picture of the view is kept from the
      moment of each scan. The same barcode only counts again after the whole view has
@@ -2598,10 +2598,12 @@
   async function ocrTick(){
     const v = $('#vid');
     if (!scanning || ocrBusy || v.readyState < 2 || Date.now() - lastReadAt < 900) return;
+    // only when something that looks like a barcode is in view right now but can't be read
+    if (!lastBox || Date.now() - lastBoxAt > 400) return;
     ocrBusy = true;
     try {
       const t0 = Date.now();
-      const g = (lastBox && Date.now() - lastBoxAt < 500) ? await readNumbersBox(v, lastBox) : await readNumbers(v);
+      const g = await readNumbersBox(v, lastBox);
       if (!g) { ocrPrev = ''; return; }
       if (g.value !== ocrPrev) { ocrPrev = g.value; return; }
       ocrPrev = '';

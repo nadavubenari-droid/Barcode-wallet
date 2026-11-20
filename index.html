@@ -7,6 +7,9 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#f3efe7">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap" rel="stylesheet">
@@ -201,7 +204,7 @@
   <div class="scan-top">
     <span id="scanCount" class="chip">0 saved</span>
     <span class="grow"></span>
-    <button id="soundBtn" class="chip on" type="button" hidden>🔇 Tap for sound</button>
+    <button id="soundBtn" class="chip on" type="button" hidden>🔊 Tap to turn sound on</button>
     <button id="lensBtn" class="chip" type="button" hidden></button>
     <button id="torchBtn" class="chip" type="button" hidden>Light</button>
     <button id="scanDone" class="chip strong" type="button">Done</button>
@@ -564,7 +567,7 @@
     const c = toCanvas(img, 1600);
     await initDetector();
     if (detector) {
-      for (const src of [c, crop(c, 0.5, 0.5, 4000)]) {
+      for (const src of [c, crop(c, 0.5, 0.5, 4000), enhance(c, 0.8)]) {
         try {
           const r = await detector.detect(src);
           const hit = r && r.find(x => x.rawValue);
@@ -574,19 +577,27 @@
     }
     await Promise.race([loadWasm(), new Promise(r => setTimeout(r, 8000))]);
     if (wasmMod) {
-      const variants = [() => c, () => crop(c, 0.6, 0.6, 1600), () => rotated(c, 25), () => rotated(c, -25), () => rotated(c, 45), () => rotated(c, -45)];
+      const variants = [() => c, () => crop(c, 0.6, 0.6, 1600), () => enhance(c, 0.8), () => rotated(c, 25), () => rotated(c, -25), () => rotated(c, 45), () => rotated(c, -45)];
       for (const make of variants) {
         try { const r = await wasmRead(make()); if (r) return r; } catch(e){}
         await tick();
       }
     }
     const Z = await waitZX(10000);
-    if (!Z) return null;
-    for (const max of [1600, 1000, 640]) {
-      await tick();
-      const r = zxDecode(Z, max === 1600 ? c : toCanvas(img, max));
-      if (r) return r;
+    if (Z) {
+      for (const max of [1600, 1000, 640]) {
+        await tick();
+        const r = zxDecode(Z, max === 1600 ? c : toCanvas(img, max));
+        if (r) return r;
+      }
     }
+    // too blurry to scan: try reading the printed numbers
+    try {
+      for (const src of [c, rotated(c, 90), rotated(c, -90)]) {
+        const g = await readNumbers(src);
+        if (g) return g;
+      }
+    } catch(e){}
     return null;
   }
 
@@ -892,12 +903,13 @@
     await initDetector();
     scanning = true; cand = ''; candN = 0;
     clearInterval(sceneT); sceneT = setInterval(sceneTick, 40);
+    clearInterval(ocrT); ocrT = setInterval(ocrTick, 250); ocrPrev = '';
     setMsg('Point at a barcode');
     updateSoundChip();
     loop();
   }
   function stopTracks(){
-    scanning = false; clearTimeout(loopT); clearInterval(sceneT);
+    scanning = false; clearTimeout(loopT); clearInterval(sceneT); clearInterval(ocrT);
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
     $('#vid').srcObject = null; torchOn = false;
   }
@@ -1067,21 +1079,89 @@
     x.translate(w / 2, h / 2); x.rotate(r); x.drawImage(src, -src.width / 2, -src.height / 2);
     return c;
   }
+  // Clean up a blurry picture: greyscale, stretch the contrast, then sharpen the edges
+  function enhance(src, sharp){
+    const w = src.width, h = src.height;
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const x = c.getContext('2d', {willReadFrequently: true});
+    x.drawImage(src, 0, 0);
+    const im = x.getImageData(0, 0, w, h), d = im.data, n = w * h, g = new Float32Array(n), hist = new Uint32Array(256);
+    for (let i = 0; i < n; i++) { const y = d[i*4] * 0.3 + d[i*4+1] * 0.59 + d[i*4+2] * 0.11; g[i] = y; hist[y | 0]++; }
+    let lo = 0, hi = 255, acc = 0;
+    for (; lo < 255; lo++) { acc += hist[lo]; if (acc > n * 0.02) break; }
+    acc = 0;
+    for (; hi > 0; hi--) { acc += hist[hi]; if (acc > n * 0.02) break; }
+    const span = Math.max(1, hi - lo), k = sharp || 0;
+    for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) {
+      const i = yy * w + xx;
+      let v = g[i];
+      if (k && xx > 0 && yy > 0 && xx < w - 1 && yy < h - 1) v = v * (1 + 4 * k) - k * (g[i-1] + g[i+1] + g[i-w] + g[i+w]);
+      v = (v - lo) * 255 / span;
+      d[i*4] = d[i*4+1] = d[i*4+2] = v < 0 ? 0 : v > 255 ? 255 : v;
+    }
+    x.putImageData(im, 0, 0);
+    return c;
+  }
+
+  /* ---------- reading the printed numbers (for codes too blurry to scan) ---------- */
+  let ocrWorker = null, ocrLoading = null;
+  function loadOCR(){
+    if (!ocrLoading) ocrLoading = new Promise(res => {
+      if (window.Tesseract) return res();
+      const sc = document.createElement('script');
+      sc.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+      sc.onload = res; sc.onerror = res; document.head.append(sc);
+    }).then(async () => {
+      if (!window.Tesseract) return;
+      const w = await Tesseract.createWorker('eng');
+      await w.setParameters({tessedit_char_whitelist: '0123456789 ', tessedit_pageseg_mode: '6'});
+      ocrWorker = w;
+    }).catch(() => {});
+    return ocrLoading;
+  }
+  // product numbers end in a check digit; this rejects most misreads
+  function gtinOk(dg){
+    let sum = 0;
+    for (let i = 0; i < dg.length - 1; i++) sum += (+dg[dg.length - 2 - i]) * (i % 2 === 0 ? 3 : 1);
+    return (10 - sum % 10) % 10 === +dg[dg.length - 1];
+  }
+  function findGtin(text){
+    const lines = String(text || '').split(/\n/).map(l => l.replace(/\D/g, '')).filter(Boolean);
+    for (const [len, fmt, extra] of [[13, 'EAN_13', 1], [12, 'UPC_A', 1], [8, 'EAN_8', 0]]) {
+      for (const l of lines) {
+        if (l.length < len || l.length > len + extra) continue;
+        for (let i = 0; i + len <= l.length; i++) {
+          const dg = l.slice(i, i + len);
+          if (gtinOk(dg)) return {value: dg, format: fmt};
+        }
+      }
+    }
+    return null;
+  }
+  function ocrInput(src){ return enhance(crop(src, 0.8, 0.6, 1200), 0); }
+  async function readNumbers(src){
+    if (!ocrWorker) { await loadOCR(); if (!ocrWorker) return null; }
+    const res = await ocrWorker.recognize(ocrInput(src));
+    return findGtin(res && res.data ? res.data.text : '');
+  }
+
   let pass = 0;
   async function detectFrame(v){
     pass++;
     if (detector) {
-      // every other check looks at a close-up of the middle, so small barcodes in a wide view still read
-      const src = pass % 2 ? v : (crop(v, 0.5, 0.5, 4000) || v);
+      // rotate between the whole view, a close-up of the middle (small codes in a wide view),
+      // and a sharpened close-up (blurry codes)
+      const m = pass % 3;
+      const src = m === 0 ? v : m === 1 ? (crop(v, 0.5, 0.5, 4000) || v) : enhance(crop(v, 0.6, 0.6, 1100), 0.8);
       const r = await detector.detect(src);
       const hit = r && r.find(x => x.rawValue);
       return hit ? {value: hit.rawValue, format: normFmt(hit.format)} : null;
     }
     if (wasmMod) {
-      const m = pass % 4;
+      const m = pass % 5;
       const base = m === 0 ? crop(v, 1, 1, 1280) : crop(v, 0.6, 0.6, 1100);
       if (!base) return null;
-      return await wasmRead(m === 2 ? rotated(base, 25) : m === 3 ? rotated(base, -25) : base);
+      return await wasmRead(m === 2 ? rotated(base, 25) : m === 3 ? rotated(base, -25) : m === 4 ? enhance(base, 0.8) : base);
     }
     const Z = window.ZXing; if (!Z) return null;
     if (!zxReader) { zxHints = new Map(); zxReader = new Z.MultiFormatReader(); zxReader.setHints(zxHints); }
@@ -1097,7 +1177,7 @@
     if (v.readyState >= 2 && !busy) {
       busy = true;
       const t0 = Date.now();
-      try { const r = await detectFrame(v); trackScene(r, t0); if (r) onCode(r, v, t0); else candN = 0; } catch(e){}
+      try { const r = await detectFrame(v); trackScene(r, t0); if (r) { lastReadAt = Date.now(); onCode(r, v, t0); } else candN = 0; } catch(e){}
       busy = false;
     }
     loopT = setTimeout(loop, 60);
@@ -1108,7 +1188,22 @@
   const SIG_W = 32, SIG_H = 24;
   const SCENE_DIFF = 0.55;   // 0 = identical view, ~1.1 = completely different view
   const CLEAR_MS = 160;      // view checked every 40ms; changed for this long ≈ product gone 0.2s
-  let clearedAt = 0, sceneT = null;
+  let clearedAt = 0, sceneT = null, ocrT = null, ocrBusy = false, ocrPrev = '', lastReadAt = 0;
+  // When the scanner can't read a barcode, read the numbers printed under it instead.
+  // A number is only accepted if its check digit is right and it is read the same way twice.
+  async function ocrTick(){
+    const v = $('#vid');
+    if (!scanning || ocrBusy || v.readyState < 2 || Date.now() - lastReadAt < 900) return;
+    ocrBusy = true;
+    try {
+      const t0 = Date.now();
+      const g = await readNumbers(v);
+      if (!g) { ocrPrev = ''; return; }
+      if (g.value !== ocrPrev) { ocrPrev = g.value; return; }
+      ocrPrev = '';
+      if (scanning && Date.now() - lastReadAt >= 900) { lastReadAt = Date.now(); onCode(g, v, t0, true); }
+    } catch(e){} finally { ocrBusy = false; }
+  }
   const sigCanvas = document.createElement('canvas'); sigCanvas.width = SIG_W; sigCanvas.height = SIG_H;
   const sigCtx = sigCanvas.getContext('2d', {willReadFrequently: true});
   function sceneSig(v){
@@ -1140,7 +1235,7 @@
     if (clearStart && t0 > clearStart) clearStart = 0;
   }
 
-  function onCode(r, v, t0){
+  function onCode(r, v, t0, fromNumbers){
     const now = Date.now();
     // the same product hasn't left the view yet: not a new scan
     if (r.value === lastVal && !cleared) return;
@@ -1161,7 +1256,7 @@
     saveItem(it);
     sessionCount++;
     $('#scanCount').textContent = sessionCount + ' saved';
-    setMsg((n > 1 ? 'Saved again ×' + n + ' · ' : 'Saved ' + fmtLabel(r.format) + ' · ') + r.value);
+    setMsg((n > 1 ? 'Saved again ×' + n + ' · ' : 'Saved ' + fmtLabel(r.format) + ' · ') + r.value + (fromNumbers ? ' (read from the numbers)' : ''));
     flash('ok'); beep('ok');
     try { if (navigator.vibrate) navigator.vibrate(70); } catch(e){}
   }
@@ -1195,6 +1290,8 @@
   purgeOld();
   setInterval(purgeOld, 60 * 60 * 1000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) purgeOld(); });
+  unlockAudio();   // works straight away wherever the browser allows sound without a tap
+  try { if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {}); } catch(e){}
   if (rowEl.checked) startScanner();
 })();
 </script>

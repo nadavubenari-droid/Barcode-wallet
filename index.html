@@ -207,6 +207,7 @@
     <button id="soundBtn" class="chip on" type="button" hidden>🔊 Tap to turn sound on</button>
     <button id="lensBtn" class="chip" type="button" hidden></button>
     <button id="torchBtn" class="chip" type="button" hidden>Light</button>
+    <button id="scanReel" class="chip" type="button">▶ Reel</button>
     <button id="scanDone" class="chip strong" type="button">Done</button>
   </div>
   <div id="scanMsg" class="scan-msg" dir="auto">Point at a barcode</div>
@@ -771,6 +772,10 @@
       stage.append(d);
       reelSlides.push({el: d, it: it, n: i + 1, ms: REEL_MS});
     });
+    const end = document.createElement('div');
+    end.className = 'slide blank';
+    stage.append(end);
+    reelSlides.push({el: end, blank: true, end: true, n: list.length, ms: BLANK_MS});
     reelTotal = list.length;
     reelIdx = -1; reelPaused = false; reelDone = false;
     $('#reelPause').textContent = 'Pause';
@@ -788,7 +793,7 @@
     const s = reelSlides[reelIdx];
     s.el.classList.add('on');
     $('#reelCount').textContent = s.n + ' / ' + reelTotal;
-    $('#reelName').textContent = s.blank ? '' : (s.it.name || '');
+    $('#reelName').textContent = s.end ? 'All shown' : s.blank ? '' : (s.it.name || '');
     scheduleNext();
   }
   function scheduleNext(){
@@ -947,6 +952,14 @@
     } catch(e){ torchOn = false; }
   });
   $('#scanDone').addEventListener('click', stopScanner);
+  // Done, then straight into the reel of what was just scanned
+  $('#scanReel').addEventListener('click', () => {
+    if (!sessionCount) { toast('Scan something first'); return; }
+    const sid = sessionId;
+    stopScanner();
+    const f = getFolder(sid);
+    if (f) openReel(f.items);
+  });
 
   /* ---------- camera lenses ---------- */
   const LENS_KEY = 'barcode-wallet-lens';

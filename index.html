@@ -101,6 +101,8 @@
   .info dd{margin:0;word-break:break-word}
   .info img{max-width:120px;max-height:120px;border-radius:10px;display:block;margin:10px auto 0}
   .info .src{grid-column:1/-1;color:var(--muted);font-size:12px}
+  .search-links{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+  .search-links a{color:var(--accent);font-weight:600;font-size:14px;text-decoration:none}
   .code-big{display:flex;align-items:center;justify-content:center;background:#fff;padding:8px}
   .code-big.bar svg{width:min(94vw,600px);height:auto}
   .code-big.qr svg{width:min(80vw,360px);height:auto}
@@ -549,13 +551,19 @@
     const rows = [];
     if (inf.brand) rows.push(['Brand', inf.brand]);
     if (inf.maker && inf.maker !== inf.brand) rows.push(['Company', inf.maker]);
-    if (inf.name) rows.push(['Product', inf.name + (inf.nameFrom === 'camera' ? ' (read from the package)' : inf.nameFrom === 'similar' ? ' (closest match to the words on the package)' : inf.nameFrom === 'family' ? ' (brand / product line read from the package)' : '')]);
-    if (inf.alts && inf.alts.length) rows.push(['Could be', inf.alts.join(' · ')]);
-    if (inf.quantity) rows.push(['Size', inf.quantity + (inf.sizeFrom === 'camera' ? ' (read from the package)' : '')]);
+    if (inf.name) rows.push(['Product', iso(inf.name) + (inf.nameFrom === 'camera' ? ' (read from the package)' : inf.nameFrom === 'similar' ? ' (closest match to the words on the package)' : inf.nameFrom === 'family' ? ' (brand / product line read from the package)' : inf.nameFrom === 'clues' ? ' (worked out from the clues below)' : '')]);
+    if (inf.why && inf.why.length) rows.push(['Clues', joinIso(inf.why, '\n')]);
+    if (inf.colour && !(inf.why || []).some(w => /Colour/.test(w))) rows.push(['Colour', inf.colour]);
+    if (inf.company) rows.push(['Company (from the barcode)', inf.company]);
+    if (inf.neighbours && inf.neighbours.length) rows.push(['Same company makes', joinIso(inf.neighbours, '\n')]);
+    if (inf.alike && inf.alike.length) rows.push(['Similar products', joinIso(inf.alike, '\n')]);
+    if (inf.alts && inf.alts.length) rows.push(['Could be', joinIso(inf.alts, '\n')]);
+    if (inf.quantity) rows.push(['Size', iso(inf.quantity) + (inf.sizeFrom === 'camera' ? ' (read from the package)' : '')]);
     if (inf.price) {
       const pr = inf.price;
       let t = pr.text;
       if (pr.src === 'camera') t += ' (price tag seen by the camera)';
+      else if (pr.src === 'alike') t += ' (estimate from similar products' + (pr.same ? ' of the same size' : '') + ')';
       else if (pr.src === 'moh') t += ' (consumer price listed by the Ministry of Health)';
       else if (pr.src === 'upc') t += ' (prices seen at online stores abroad)';
       else if (pr.src === 'similar') t += ' (typical price of the closest match, same size)';
@@ -565,12 +573,14 @@
     }
     if (inf.kind) rows.push(['Type', inf.kind === 'gsl' ? 'Medicine sold without a prescription, also outside pharmacies' : 'Medicine sold without a prescription']);
     if (inf.extra) rows.push(['Active ingredient', inf.extra]);
-    if (inf.where && inf.where.length) rows.push(['Sold at', inf.where.join(' · ')]);
+    if (inf.where && inf.where.length) rows.push(['Sold at', joinIso(inf.where, ' · ')]);
     if (inf.category) rows.push(['Category', inf.category]);
     if (inf.nutri) rows.push(['Nutri-Score', inf.nutri]);
     if (inf.country) rows.push(['Barcode from', inf.country]);
     if (inf.seenText) rows.push(['On the package', inf.seenText]);
-    short.textContent = [inf.nameFrom === 'shops' ? '' : inf.brand, inf.name && inf.name !== inf.brand ? inf.name : '', inf.nameFrom === 'shops' ? '' : inf.quantity, inf.price && inf.price.text].filter(Boolean).join(' · ')
+    if (inf.nameFrom === 'clues') short.dataset.clue = '1';
+    const nm = inf.name && inf.name !== inf.brand ? inf.name : '';
+    short.textContent = joinIso([inf.nameFrom === 'shops' ? '' : inf.brand, nm, inf.nameFrom === 'shops' || (nm && inf.quantity && nm.indexOf(inf.quantity) >= 0) ? '' : inf.quantity, inf.price && inf.price.text], ' · ')
       || (inf.country ? 'Not in the product databases yet · barcode from ' + inf.country : 'Not in the product databases yet');
     box.append(short);
     if (!rows.length) return;
@@ -582,13 +592,23 @@
     const dl = document.createElement('dl');
     for (const [k, v] of rows) {
       const dt = document.createElement('dt'); dt.textContent = k;
-      const dd = document.createElement('dd'); dd.textContent = v; dd.dir = 'auto';
+      const dd = document.createElement('dd'); dd.textContent = v; dd.style.whiteSpace = 'pre-line';
       dl.append(dt, dd);
     }
     const src = document.createElement('div'); src.className = 'src';
     src.textContent = 'From: ' + [inf.shops ? (inf.kind && !(inf.where && inf.where.length) ? 'Ministry of Health medicines registry' : 'Israeli supermarket & pharmacy price lists' + (inf.kind ? ', Ministry of Health medicines registry' : '')) : '', inf.source ? SOURCE_NAMES[inf.source] || inf.source : '', inf.price && inf.price.src === 'openprices' ? 'Open Prices' : '', inf.seenText || inf.nameFrom === 'camera' || inf.sizeFrom === 'camera' || (inf.price && inf.price.src === 'camera') ? 'your camera' : '', inf.country ? 'the barcode number' : ''].filter(Boolean).join(', ');
     dl.append(src);
     box.append(dl);
+    // search the web yourself (opens your browser; no AI, no cost)
+    const code = (items.find(x => x.id === showId) || {}).value || '';
+    if (code) {
+      const links = document.createElement('div'); links.className = 'search-links';
+      const add = (label, q) => { const a = document.createElement('a'); a.href = 'https://www.google.com/search?q=' + encodeURIComponent(q); a.target = '_blank'; a.rel = 'noopener'; a.textContent = label; links.append(a); };
+      add('🔎 Search the barcode online', code);
+      const words = [inf.company || inf.brand, inf.looksLike || inf.name, inf.quantity].filter(Boolean).join(' ');
+      if (words && words !== code) add('🔎 Search "' + iso(words) + '"', words.replace(/[\u2068\u2069]/g, ''));
+      box.append(links);
+    }
     if (inf.image && /^https:\/\//.test(inf.image)) {
       const im = document.createElement('img'); im.src = inf.image; im.alt = ''; im.referrerPolicy = 'no-referrer';
       im.onerror = () => im.remove();
@@ -1471,6 +1491,137 @@
     }
     return best;
   }
+  /* ----- putting the clues together ("what does it seem to be?") -----
+     Each rule looks for words on the package (Hebrew or English, ingredients included).
+     The best-scoring kind of product, its form (spray, cream…), its size and its colour
+     are combined into a description, with the reasons kept for the More panel. */
+  const KINDS = [
+    {k: 'sunscreen', name: 'Sunscreen', he: ['הגנה', 'spf', 'מהשמש', 'שמש'], need: 2, re: /\bspf\b|\buva\b|\buvb\b|מסנן|הגנה מהשמש|קרם הגנה|octocrylene|avobenzone|butyl methoxydibenzoylmethane|homosalate|ethylhexyl (salicylate|methoxycinnamate|triazone)|bis-ethylhexyloxyphenol|titanium dioxide|zinc oxide|sun ?(screen|care|protect)/i, why: 'sun-protection words or UV filters on the label'},
+    {k: 'aftersun', name: 'After-sun care', he: ['אפטר', 'סאן'], re: /after ?sun|אפטר ?סאן|לאחר השמש/i, why: '"after sun" on the label'},
+    {k: 'deodorant', name: 'Deodorant', he: ['דאודורנט', 'דיאודורנט'], re: /deodorant|דאודורנט|דיאודורנט|antiperspirant|אנטי.?פרספירנט|aluminum chlorohydrate|aluminium chlorohydrate/i, why: 'deodorant words or ingredients'},
+    {k: 'shampoo', name: 'Shampoo', he: ['שמפו'], re: /shampoo|שמפו/i, why: '"shampoo" on the label'},
+    {k: 'conditioner', name: 'Hair conditioner', he: ['מרכך'], re: /conditioner|מרכך|behentrimonium|cetrimonium/i, why: 'conditioner words or ingredients'},
+    {k: 'hair', name: 'Hair styling product', he: ['שיער'], re: /hair ?spray|לכה|mousse|ג'ל לשיער|ספריי לשיער|מתיר קשרים|detangl/i, why: 'hair-styling words'},
+    {k: 'wash', name: 'Body wash / soap', he: ['סבון', 'רחצה'], re: /shower|body wash|סבון|תחליב רחצה|sodium laureth sulfate|cocamidopropyl betaine/i, why: 'washing words or ingredients'},
+    {k: 'repellent', name: 'Insect repellent', he: ['דוחה', 'יתושים'], re: /icaridin|\bdeet\b|repellent|דוחה יתושים|יתושים/i, why: 'insect-repellent words'},
+    {k: 'freshener', name: 'Air freshener', he: ['מטהר', 'אוויר'], re: /air freshener|מטהר אוויר|ריח לבית/i, why: 'air-freshener words'},
+    {k: 'cleaner', name: 'Household cleaner', he: ['ניקוי'], re: /cleaner|ניקוי|אקונומיקה|sodium hypochlorite|degreaser|מסיר שומנים|נוזל כלים/i, why: 'cleaning words or ingredients'},
+    {k: 'medicine', name: 'Medicine', he: ['טבליות'], re: /tablets|טבליות|כמוסות|capsules|active ingredient|חומר פעיל|\d+ ?mg\b/i, why: 'medicine words (tablets, mg, active ingredient)'},
+    {k: 'food', name: 'Food or drink', he: [], re: /ערכים תזונתיים|nutrition|calories|קלוריות|חלבונים|פחמימות|carbohydrate|ingredients:? sugar|סוכר/i, why: 'a nutrition table'},
+    {k: 'lotion', name: 'Cream / lotion', he: ['קרם'], re: /\bcream\b|lotion|קרם|תחליב|moistur|לחות/i, why: '"cream" or "lotion" on the label'},
+    {k: 'cosmetic', name: 'Skin or body care product', he: [], re: /\baqua\b|aloe barbadensis|tocopheryl|glycerin|parfum|phenoxyethanol|potassium sorbate|sodium benzoate|dimethicone|אלוורה/i, why: 'cosmetic ingredients (aqua, aloe, vitamin E…)'}
+  ];
+  const FORMS = [
+    {k: 'spray', name: 'spray', he: ['ספריי', 'תרסיס'], re: /spray|ספריי|תרסיס|aerosol|butane|isobutane|propane|propellant|\bmist\b|מתז/i, why: 'spray words or propellant gases'},
+    {k: 'roll', name: 'roll-on', he: ['רול'], re: /roll[- ]?on|רול ?און/i, why: '"roll-on" on the label'},
+    {k: 'stick', name: 'stick', he: ['סטיק'], re: /\bstick\b|סטיק/i, why: '"stick" on the label'},
+    {k: 'gel', name: 'gel', he: ['ג\'ל'], re: /\bgel\b|ג'ל/i, why: '"gel" on the label'}
+  ];
+  function colourName(h, s, v){
+    if (v < 0.22) return 'black';
+    if (s < 0.18) return v > 0.8 ? 'white' : 'grey';
+    const light = v > 0.75 && s < 0.6;
+    const names = [[15, 'red'], [40, 'orange'], [70, 'yellow'], [160, 'green'], [190, 'turquoise'], [250, 'blue'], [290, 'purple'], [340, 'pink'], [361, 'red']];
+    let n = names.find(([lim]) => h < lim)[1];
+    if (n === 'blue' || n === 'turquoise') n = light ? 'light blue' : n === 'turquoise' ? 'turquoise' : 'blue';
+    else if (light && n !== 'yellow' && n !== 'pink') n = 'light ' + n;
+    return n;
+  }
+  // the package's main colour, measured around the barcode (the white label and the bars are skipped)
+  function packageColour(f){
+    let b = null;
+    try { b = locate(f); } catch(e){}
+    const W = f.width, H = f.height;
+    let x0 = 0, y0 = 0, x1 = W, y1 = H;
+    if (b) {
+      const cx = b.cx * b.scale, cy = b.cy * b.scale, r = Math.max(b.hu, b.hw) * b.scale * 2.6;
+      x0 = Math.max(0, cx - r); y0 = Math.max(0, cy - r); x1 = Math.min(W, cx + r); y1 = Math.min(H, cy + r);
+    } else { x0 = W * 0.25; y0 = H * 0.25; x1 = W * 0.75; y1 = H * 0.75; }
+    const d = f.getContext('2d', {willReadFrequently: true}).getImageData(Math.round(x0), Math.round(y0), Math.max(1, Math.round(x1 - x0)), Math.max(1, Math.round(y1 - y0))).data;
+    const bins = new Map();
+    let total = 0;
+    for (let i = 0; i < d.length; i += 16) {
+      const r = d[i] / 255, g = d[i+1] / 255, bl = d[i+2] / 255, mx = Math.max(r, g, bl), mn = Math.min(r, g, bl), v = mx, s = mx ? (mx - mn) / mx : 0;
+      if (s < 0.18) continue;   // white label, black bars, grey background
+      let h = 0;
+      if (mx !== mn) { h = mx === r ? 60 * (((g - bl) / (mx - mn)) % 6) : mx === g ? 60 * ((bl - r) / (mx - mn) + 2) : 60 * ((r - g) / (mx - mn) + 4); if (h < 0) h += 360; }
+      const name = colourName(h, s, v);
+      bins.set(name, (bins.get(name) || 0) + 1); total++;
+    }
+    if (!total) return '';
+    const [name, n] = [...bins.entries()].sort((a, b) => b[1] - a[1])[0];
+    return n / total > 0.3 ? name : '';
+  }
+  function readClues(text, size, colour){
+    const t = String(text || '');
+    const kinds = KINDS.map(k => ({k: k, n: (t.match(new RegExp(k.re.source, 'gi')) || []).length})).filter(x => x.n).sort((a, b) => b.n - a.n);
+    // a specific kind wins over the generic "cream" / "cosmetic" ones when both are present
+    const specific = kinds.find(x => x.k.k !== 'lotion' && x.k.k !== 'cosmetic');
+    const kind = specific ? specific.k : kinds.length ? kinds[0].k : null;
+    const form = FORMS.find(f => f.re.test(t)) || null;
+    const why = [];
+    if (kind) why.push(kind.name + ': ' + kind.why);
+    if (form) why.push('Form — ' + form.name + ': ' + form.why);
+    if (size) why.push('Size ' + size + (/מ["״]?ל|ml|ליטר|ל'|\bl\b/i.test(size) ? ' → it holds a liquid' : /ג|גר|kg|g\b|ק["״]?ג/i.test(size) ? ' → sold by weight' : ''));
+    if (colour) why.push('Colour around the barcode: ' + colour);
+    let desc = kind ? kind.name : '';
+    if (form && desc) desc += ' ' + form.name; else if (form) desc = form.name.charAt(0).toUpperCase() + form.name.slice(1);
+    return {kind: kind, form: form, desc: desc, why: why, cosmetic: kinds.some(x => x.k.k === 'cosmetic')};
+  }
+  // products in the supermarket table that look like the same kind of thing
+  async function similarProducts(clues, sizeText){
+    if (!clues.kind || !clues.kind.he.length) return null;
+    if (!vocabP) vocabP = ilGet('vocab.json');
+    const vocab = await vocabP; if (!vocab) { vocabP = null; return null; }
+    const want = sizeKey(sizeText);
+    const kindToks = clues.kind.he.map(w => normTokens(w)[0]).filter(t => t && vocab[t]);
+    const formToks = clues.form ? clues.form.he.map(w => normTokens(w)[0]).filter(t => t && vocab[t]) : [];
+    const sets = [];
+    for (const t of kindToks.concat(formToks)) {
+      const k = shardOf(t);
+      if (!postShards[k]) postShards[k] = ilGet('t/' + k + '.json');
+      const sh = await postShards[k];
+      sets.push({t: t, kind: kindToks.includes(t), codes: new Set((sh && sh[t]) || [])});
+    }
+    const score = new Map();
+    for (const st of sets) for (const c of st.codes) {
+      const o = score.get(c) || {kind: 0, form: 0};
+      if (st.kind) o.kind++; else o.form++;
+      score.set(c, o);
+    }
+    const need = Math.min(clues.kind.need || 1, kindToks.length);
+    const pick = [...score.entries()].filter(([, o]) => o.kind >= need && (!formToks.length || o.form)).map(([c]) => c).slice(0, 60);
+    const rows = [];
+    for (const code of pick) {
+      const k = code.slice(-2);
+      if (!ilShards[k]) ilShards[k] = ilGet('p/' + k + '.json');
+      const sh = await ilShards[k];
+      const row = sh && sh[code];
+      if (row && row[5]) rows.push({code: code, row: row, same: !!want && (sizeKey(row[2]) === want || sizeKey(row[0]) === want)});
+    }
+    if (!rows.length) return null;
+    rows.sort((a, b) => (b.same - a.same) || (b.row[6] - a.row[6]));
+    const top = rows.slice(0, 6);
+    // typical range: the middle of the prices, so one luxury item doesn't stretch it
+    const base = rows.filter(r => r.same).length >= 3 ? rows.filter(r => r.same) : rows;
+    const prices = base.map(r => r.row[5]).sort((a, b) => a - b);
+    const med = prices[Math.floor(prices.length / 2)];
+    const mid = prices.filter(p => p <= med * 1.8 && p >= med / 1.8);
+    return {items: top.map(r => r.row[0] + ' (' + money(r.row[5], 'ILS') + ')'), low: mid[0], high: mid[mid.length - 1], sameSize: top.some(r => r.same)};
+  }
+  // products whose barcodes start with the same digits usually come from the same company
+  async function barcodeNeighbours(code){
+    if (code.length !== 13) return null;
+    const list = await ilGet('n/' + code.slice(0, 8) + '.json');
+    if (!list || !list.length) return null;
+    const lcp = c => { let n = 0; while (n < 13 && c[n] === code[n]) n++; return n; };
+    const need = /^729/.test(code) ? 9 : 8;
+    const near = list.filter(r => r[0] !== code && lcp(r[0]) >= need).sort((a, b) => lcp(b[0]) - lcp(a[0]) || Math.abs(+a[0] - +code) - Math.abs(+b[0] - +code)).slice(0, 5);
+    if (!near.length) return null;
+    const makers = near.map(r => r[2]).filter(Boolean);
+    const maker = makers.length && makers.filter(m => m === makers[0]).length >= Math.ceil(near.length / 2) ? makers[0] : '';
+    return {maker: maker, names: near.map(r => r[1])};
+  }
   // which country's barcode office the number was registered with (first digits)
   function gs1Country(code){
     if (!isGtin(code)) return '';
@@ -1594,11 +1745,13 @@
     }
     saveItem(upd);
   }
+  const iso = t => t ? '\u2068' + t + '\u2069' : '';
+  const joinIso = (parts, sep) => parts.filter(Boolean).map(iso).join(sep);
   function shortLabel(brand, name, price){
     if (brand && name && name.toLowerCase().indexOf(brand.toLowerCase()) >= 0) brand = '';
     let t = [brand, name].filter(Boolean).join(' ');
     if (t.length > 32) t = t.slice(0, 31).trim() + '…';
-    return price ? (t ? t + ' · ' + price : price) : t;
+    return joinIso([t, price], ' · ');
   }
   function photoCanvas(dataUrl){
     return new Promise(res => { const i = new Image(); i.onload = () => res(toCanvas(i, 1200)); i.onerror = () => res(null); i.src = dataUrl; });
@@ -1658,6 +1811,10 @@
         }
       }
     }
+    let colour = '';
+    try { if (frames.length) colour = packageColour(frames[0]); } catch(e){}
+    const old2 = it.info || {};
+    if (!colour && old2.colour) colour = old2.colour;
     job.frames = null; job.photo = null;
     // 3. put it together
     if (known && (arabic(known.name) || arabic(known.brand)) && (/^729/.test(code) || (seen && seen.heb >= 2))) known = null;
@@ -1665,6 +1822,14 @@
     let similar = null;
     if (!shop && !(known && known.name) && seen && seen.raw && seen.raw.length) {
       try { similar = await searchByWords(seen.raw.concat(seen.guess ? [seen.guess] : []), seen.size, seen.text + ' ' + seen.guess); } catch(e){}
+    }
+    // still unknown: reason from the clues
+    let clues = null, alike = null, neighbours = null;
+    if (!shop && !(known && known.name) && isGtin(code)) {
+      const allText = seen ? (seen.raw || []).join(' ') + ' ' + seen.text : '';
+      clues = readClues(allText, seen && seen.size, colour);
+      try { neighbours = await barcodeNeighbours(code); } catch(e){}
+      try { alike = await similarProducts(clues, seen && seen.size); } catch(e){}
     }
     // Israeli shop names are full descriptions ("<brand> <product> <size>"), so they lead when present
     const brand = known && known.brand ? known.brand : shop ? shop.maker : similar && similar.maker ? similar.maker : '';
@@ -1676,8 +1841,13 @@
       shopName = hasSize ? cut : cut + ' ' + shop.size;
     }
     const simName = similar ? (similar.confident ? similar.best.row[0] : similar.family + (seen && seen.size ? ' ' + seen.size : '')) : '';
-    const name = shopName || (known && known.name ? known.name : simName ? simName : seen && seen.guess ? seen.guess : '');
-    const nameFrom = shop && shop.name ? 'shops' : known && known.name ? 'db' : simName ? (similar.confident ? 'similar' : 'family') : name ? 'camera' : '';
+    let clueName = '';
+    if (clues && clues.desc) {
+      const who = (similar && !similar.confident && similar.family) || (neighbours && neighbours.maker) || '';
+      clueName = joinIso([who, clues.desc, seen && seen.size], ' · ');
+    }
+    const name = shopName || (known && known.name ? known.name : simName && (!clueName || similar.confident) ? simName : clueName ? clueName : seen && seen.guess ? seen.guess : '');
+    const nameFrom = shop && shop.name ? 'shops' : known && known.name ? 'db' : simName && name === simName ? (similar.confident ? 'similar' : 'family') : clueName && name === clueName ? 'clues' : name ? 'camera' : '';
     const size = known && known.quantity ? known.quantity : shop && shop.size ? shop.size : seen && seen.size ? seen.size
       : similar && similar.confident && similar.best.row[2] ? similar.best.row[2] : '';
     const pr = seen && seen.price ? {text: seen.price, src: 'camera'}
@@ -1686,15 +1856,19 @@
       : similar && similar.confident && similar.best.sameSize && similar.best.row[5] ? {text: '~' + money(similar.best.row[5], 'ILS'), src: 'similar'}
       : price && price.found && price.amount ? {text: money(price.amount, price.currency), src: 'openprices', date: price.date, store: price.store, city: price.city, count: price.count}
       : upc && upc.found && upc.low ? {text: money(upc.low, 'USD') + (upc.high > upc.low ? '–' + money(upc.high, 'USD') : ''), src: 'upc'}
+      : alike && alike.low ? {text: '~' + money(alike.low, 'ILS') + (alike.high > alike.low ? '–' + money(alike.high, 'ILS') : ''), src: 'alike', same: alike.sameSize}
       : null;
-    const info = {v: 4, status: 'done', label: shortLabel(nameFrom === 'shops' || nameFrom === 'similar' || nameFrom === 'family' ? '' : brand, name, pr && pr.text), brand: brand, name: name,
+    const info = {v: 6, status: 'done', label: shortLabel(nameFrom === 'shops' || nameFrom === 'similar' || nameFrom === 'family' || nameFrom === 'clues' ? '' : brand, name, pr && pr.text), brand: brand, name: name,
       alts: similar && !similar.confident ? similar.alts : [], heard: similar ? similar.matched : [],
       nameFrom: nameFrom, quantity: size, sizeFrom: known && known.quantity ? 'db' : shop && shop.size ? 'shops' : size ? 'camera' : '',
       maker: shop ? shop.maker : '', category: known ? known.category : '', country: gs1Country(code),
       where: shop ? shop.where : [], kind: shop ? shop.kind : '', extra: shop ? shop.extra : '',
+      colour: colour, why: clues ? clues.why : [], looksLike: clues ? clues.desc : '',
+      neighbours: neighbours ? neighbours.names : [], company: neighbours && neighbours.maker ? neighbours.maker : '',
+      alike: alike ? alike.items : [],
       nutri: known ? known.nutri : '', image: known ? known.image : '', source: known ? known.source : '', shops: !!shop,
       price: pr, seenText: seen ? seen.text : '', t: Date.now()};
-    if (!prod && !il && !seen) info.status = 'offline';   // try again later
+    if (!prod && !il && !seen && !clues) info.status = 'offline';   // try again later
     setInfo(it.id, info);
   }
 
@@ -1880,7 +2054,7 @@
   }
   let pass = 0, lastBox = null, lastBoxAt = 0;
   const frameBuf = []; let lastBufAt = 0;
-  window.__bwTest = {locate: locate, straighten: straighten, searchByWords: (w, s, t) => searchByWords(w, s, t), aroundBarcode: aroundBarcode};
+  window.__bwTest = {locate: locate, straighten: straighten, searchByWords: (w, s, t) => searchByWords(w, s, t), readClues: readClues, similarProducts: similarProducts, barcodeNeighbours: barcodeNeighbours, packageColour: packageColour, aroundBarcode: aroundBarcode};
   async function detectFrame(v){
     pass++;
     let box = null;
@@ -2066,7 +2240,7 @@
   try { if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {}); } catch(e){}
   if (rowEl.checked) startScanner();
   setTimeout(() => {
-    items.filter(it => isGtin(it.value) && (!it.info || it.info.status !== 'done' || (it.info.v || 0) < 4 || (!it.info.name && it.info.t < Date.now() - 6 * 3600e3))).slice(0, 40).forEach(it => analyzeLater({id: it.id, photo: it.photo}));
+    items.filter(it => isGtin(it.value) && (!it.info || it.info.status !== 'done' || (it.info.v || 0) < 6 || (!it.info.name && it.info.t < Date.now() - 6 * 3600e3))).slice(0, 40).forEach(it => analyzeLater({id: it.id, photo: it.photo}));
   }, 2500);
 })();
 </script>

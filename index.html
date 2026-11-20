@@ -549,12 +549,14 @@
     const rows = [];
     if (inf.brand) rows.push(['Brand', inf.brand]);
     if (inf.maker && inf.maker !== inf.brand) rows.push(['Company', inf.maker]);
-    if (inf.name) rows.push(['Product', inf.name + (inf.nameFrom === 'camera' ? ' (read from the package)' : '')]);
+    if (inf.name) rows.push(['Product', inf.name + (inf.nameFrom === 'camera' ? ' (read from the package)' : inf.nameFrom === 'similar' ? ' (closest match to the words on the package)' : inf.nameFrom === 'family' ? ' (brand / product line read from the package)' : '')]);
+    if (inf.alts && inf.alts.length) rows.push(['Could be', inf.alts.join(' · ')]);
     if (inf.quantity) rows.push(['Size', inf.quantity + (inf.sizeFrom === 'camera' ? ' (read from the package)' : '')]);
     if (inf.price) {
       const pr = inf.price;
       let t = pr.text;
       if (pr.src === 'camera') t += ' (price tag seen by the camera)';
+      else if (pr.src === 'similar') t += ' (typical price of the closest match, same size)';
       else if (pr.src === 'shops') t += ' (typical; ' + (pr.min && pr.max && pr.min !== pr.max ? money(pr.min, 'ILS') + '–' + money(pr.max, 'ILS') + ', ' : '') + (pr.chains || 1) + (pr.chains === 1 ? ' chain' : ' chains') + (pr.date ? ', price lists of ' + pr.date : '') + ')';
       else t += ' (' + ['reported on Open Prices', pr.store, pr.city, pr.date].filter(Boolean).join(', ') + (pr.count > 1 ? '; ' + pr.count + ' reports' : '') + ')';
       rows.push(['Price', t]);
@@ -1316,6 +1318,152 @@
     return {found: true, name: row[0] || '', maker: row[1] || '', size: row[2] || '', min: row[3], max: row[4], median: row[5], chains: row[6] || 0,
             updated: meta && meta.updated || ''};
   }
+  // ----- finding products by the words read off the package -----
+  // same normalisation as scripts/build_products.py
+  const FINALS = {'ם': 'מ', 'ן': 'נ', 'ץ': 'צ', 'ף': 'פ', 'ך': 'כ'};
+  const toFinal = t => t.replace(/[םןץףך]/g, c => FINALS[c]);
+  const UNIT_WORDS = new Set('גרם גר מל ליטר ל קג ק ג יח יחידות יחידה ml g gr kg l מ סמ cm x'.split(' ').map(toFinal));
+  function normTokens(text){
+    let s = String(text || '').toLowerCase().replace(/[\u0591-\u05C7]/g, '').replace(/["'״׳`]/g, '');
+    s = toFinal(s).replace(/דוקטור/g, 'דר');
+    return (s.match(/[א-תa-z0-9]+/g) || []).filter(t => t.length >= 2 && !/^\d+$/.test(t) && !UNIT_WORDS.has(t) && !/^\d+[a-zא-ת]{0,3}$/.test(t));
+  }
+  function shardOf(t){
+    let h = 0x811C9DC5;
+    for (let i = 0; i < t.length; i++) { h ^= t.charCodeAt(i); h = Math.imul(h, 16777619) >>> 0; }
+    return h % 64;
+  }
+  function editDist(a, b, max){
+    if (Math.abs(a.length - b.length) > max) return max + 1;
+    let prev = Array.from({length: b.length + 1}, (_, i) => i);
+    for (let i = 1; i <= a.length; i++) {
+      const cur = [i]; let best = i;
+      for (let j = 1; j <= b.length; j++) {
+        cur[j] = Math.min(prev[j] + 1, cur[j-1] + 1, prev[j-1] + (a[i-1] === b[j-1] ? 0 : 1));
+        if (cur[j] < best) best = cur[j];
+      }
+      if (best > max) return max + 1;
+      prev = cur;
+    }
+    return prev[b.length];
+  }
+  let vocabP = null;
+  const postShards = {};
+  // the package reader makes small mistakes ("פיור" for "פישר"), so close words count too
+  const STOP = new Set('זה זו של עם את על גם כל לא או הוא היא אם כי יש אין מה מי רק עוד בלי עד the and for with new חדש'.split(' ').map(toFinal));
+  function matchVocab(vocab, tokens){
+    const out = new Map();
+    const list = Object.keys(vocab);
+    for (const q of new Set(tokens)) {
+      if (STOP.has(q)) continue;
+      if (vocab[q]) out.set(q, {tok: q, dist: 0});
+      if (q.length < 4) continue;
+      if (vocab[q] && vocab[q] > 40) continue;   // a common real word: trust it
+      const max = q.length >= 7 ? 2 : 1;
+      let best = null;
+      for (const w of list) {
+        if (Math.abs(w.length - q.length) > max || w[0] !== q[0] && w[w.length-1] !== q[q.length-1]) continue;
+        const d = editDist(q, w, max);
+        if (d <= max && (!best || d < best.dist || (d === best.dist && vocab[w] > vocab[best.tok]))) best = {tok: w, dist: d};
+      }
+      if (best && best.tok !== q && !out.has(best.tok) && (!vocab[q] || vocab[best.tok] >= vocab[q] * 5)) out.set(best.tok, best);
+    }
+    return [...out.values()];
+  }
+  function sizeKey(t){
+    const m = /(\d+(?:[.,]\d+)?)\s*(ק["״]?ג|קילו\S*|גר\S*|ג'|מ["״]ל|מיליליטר\S*|ליטר\S*|ל'|kg|g|ml|l)(?![a-zא-ת])/i.exec(String(t || '').replace(/(\d)([^\d\s.,])/, '$1 $2'));
+    if (!m) return '';
+    let n = parseFloat(m[1].replace(',', '.')), u = m[2].toLowerCase();
+    if (/^(ק|קילו|kg)/.test(u)) { n *= 1000; u = 'g'; } else if (/^(גר|ג'|g)/.test(u)) u = 'g';
+    else if (/^(ליטר|ל'|l$)/.test(u)) { n *= 1000; u = 'ml'; } else u = 'ml';
+    return Math.round(n) + u;
+  }
+  async function searchByWords(words, sizeText, strongText){
+    if (!vocabP) vocabP = ilGet('vocab.json');
+    const vocab = await vocabP;
+    if (!vocab) { vocabP = null; return null; }
+    const matched = matchVocab(vocab, normTokens(words.join(' '))).filter(m => vocab[m.tok] <= 3000);
+    if (!matched.length) return null;
+    const N = 70000, scores = new Map(), hits = new Map(), toks = new Map();
+    for (const m of matched) {
+      const k = shardOf(m.tok);
+      if (!postShards[k]) postShards[k] = ilGet('t/' + k + '.json');
+      const sh = await postShards[k];
+      if (!sh) { delete postShards[k]; continue; }
+      const codes = sh[m.tok] || [];
+      const w = Math.log(N / Math.max(1, vocab[m.tok])) * (m.dist ? 0.5 : 1) * Math.min(1, (m.tok.length - 1) / 3);
+      for (const c of codes) { scores.set(c, (scores.get(c) || 0) + w); hits.set(c, (hits.get(c) || 0) + 1); (toks.get(c) || toks.set(c, []).get(c)).push(m.tok); }
+    }
+    const top = [...scores.entries()].sort((a, b) => b[1] - a[1]).slice(0, 12);
+    if (!top.length) return null;
+    const want = sizeKey(sizeText);
+    const cands = [];
+    for (const [code, sc] of top) {
+      const k = code.slice(-2);
+      if (!ilShards[k]) ilShards[k] = ilGet('p/' + k + '.json');
+      const sh = await ilShards[k];
+      const row = sh && sh[code];
+      if (!row) continue;
+      const sameSize = want && (sizeKey(row[2]) === want || sizeKey(row[0]) === want);
+      cands.push({code: code, row: row, hits: hits.get(code), score: sc + (sameSize ? 2 : 0), sameSize: !!sameSize});
+    }
+    cands.sort((a, b) => b.score - a.score);
+    if (!cands.length) return null;
+    const best = cands[0], second = cands[1];
+    // one shaky word is not enough: it must have been read clearly
+    const strong = new Set(normTokens(strongText || ''));
+    if (best.hits < 2 && !(toks.get(best.code) || []).some(t => strong.has(t))) return null;
+    const confident = best.hits >= 2 && (!second || best.score >= second.score * 1.25 || (best.sameSize && best.hits >= 3 && !second.sameSize));
+    // words shared by most of the likely products = the brand / product line
+    const near = cands.filter(c => c.score >= best.score * 0.7);
+    const fam = matched.filter(m => near.filter(c => normTokens(c.row[0] + ' ' + c.row[1]).includes(m.tok)).length >= Math.ceil(near.length * 0.6));
+    const display = t => {
+      for (const c of near) for (const w of (c.row[1] + ' ' + c.row[0]).split(/\s+/)) if (normTokens(w)[0] === t) return w;
+      return t;
+    };
+    const makers = near.map(c => c.row[1]).filter(Boolean);
+    const maker = makers.length && makers.filter(x => x === makers[0]).length >= near.length * 0.6 ? makers[0] : '';
+    const famWords = fam.map(m => display(m.tok)).filter(w => !maker || normTokens(maker).indexOf(normTokens(w)[0]) < 0);
+    return {best: best, confident: confident, maker: maker, family: [maker].concat(famWords).filter(Boolean).join(' ').trim(),
+            alts: near.slice(0, 4).map(c => c.row[0]), matched: matched.map(m => m.tok)};
+  }
+  // ----- lining the picture up with the barcode, so the text on the label reads straight -----
+  function aroundBarcode(src, b, turn){
+    const s = b.scale, cx = b.cx * s, cy = b.cy * s;
+    const W = Math.min((src.width || 0), Math.max(b.hu * 2 * s * 4.5, 500));
+    const H = Math.min((src.height || 0) * 1.2, Math.max(b.hw * 2 * s * 6, 500));
+    const k = Math.min(3, 1600 / W, 1600 / H);
+    const c = document.createElement('canvas'); c.width = Math.round(W * k); c.height = Math.round(H * k);
+    const x = c.getContext('2d', {willReadFrequently: true});
+    x.fillStyle = '#fff'; x.fillRect(0, 0, c.width, c.height);
+    x.imageSmoothingQuality = 'high';
+    x.translate(c.width / 2, c.height / 2); x.scale(k, k); x.rotate(-b.th + (turn ? Math.PI : 0)); x.translate(-cx, -cy);
+    x.drawImage(src, 0, 0);
+    return c;
+  }
+  function upscale(src, max){
+    const k = Math.min(2.5, max / Math.max(src.width, src.height));
+    if (k <= 1.05) return src;
+    const c = document.createElement('canvas'); c.width = Math.round(src.width * k); c.height = Math.round(src.height * k);
+    const x = c.getContext('2d'); x.imageSmoothingQuality = 'high'; x.drawImage(src, 0, 0, c.width, c.height);
+    return c;
+  }
+  // read one camera frame every way that might work, keep the best reading
+  async function readFrame(f){
+    let box = null;
+    try { box = locate(f); } catch(e){}
+    const tries = box ? [() => aroundBarcode(f, box, false), () => aroundBarcode(f, box, true)]
+                      : [() => upscale(f, 1600), () => upscale(rotated(f, 90), 1600), () => upscale(rotated(f, -90), 1600)];
+    let best = null;
+    for (const make of tries) {
+      await waitQuiet();
+      let r = null;
+      try { r = await readPackage(make()); } catch(e){}
+      if (r && (!best || r.heb > best.heb)) best = r;
+      if (best && best.heb >= 4) break;
+    }
+    return best;
+  }
   // which country's barcode office the number was registered with (first digits)
   function gs1Country(code){
     if (!isGtin(code)) return '';
@@ -1350,7 +1498,8 @@
   function loadLabelOCR(){
     if (!lblLoading) lblLoading = loadOCRScript().then(async () => {
       if (!window.Tesseract) return;
-      lblWorker = await Tesseract.createWorker(['eng', 'heb']);
+      lblWorker = await Tesseract.createWorker(['heb', 'eng']);
+      try { await lblWorker.setParameters({tessedit_pageseg_mode: '6'}); } catch(e){}
     }).catch(() => {});
     return lblLoading;
   }
@@ -1391,7 +1540,9 @@
       line.sort((a, b) => heb ? b.x - a.x : a.x - b.x);
       guess = line.slice(0, 4).map(w => w.t).join(' ').slice(0, 30);
     }
-    return {guess: guess, price: findPrice(data.text), size: findSize(data.text), text: words.slice(0, 12).map(w => w.t).join(' ')};
+    const raw = wordsOf(data).filter(w => w && w.text && w.confidence >= 40).map(w => w.text);
+    const heb = raw.filter(t => /[\u05D0-\u05EA]{2,}/.test(t)).length;
+    return {guess: guess, price: findPrice(data.text), size: findSize(data.text), text: words.slice(0, 12).map(w => w.t).join(' '), raw: raw, heb: heb};
   }
   // ----- the queue -----
   const queue = [];
@@ -1452,7 +1603,8 @@
         if (prod && price && il) { infoCache[code] = {prod: prod, price: price, il: il, t: Date.now()}; saveInfoCache(); }
       }
     }
-    const known = prod && prod.found ? prod : null;
+    let known = prod && prod.found ? prod : null;
+    const arabic = t => /[\u0600-\u06FF]/.test(t || '');
     const shop = il && il.found ? il : null;
     // 2. the camera frames, on the phone, once scanning is quiet
     let frames = job.frames || [];
@@ -1462,29 +1614,36 @@
     const old = it.info || {};
     if (!frames.length && (old.seenText || old.nameFrom === 'camera' || old.sizeFrom === 'camera' || (old.price && old.price.src === 'camera')))
       seen = {guess: old.nameFrom === 'camera' ? old.name : '', price: old.price && old.price.src === 'camera' ? old.price.text : '',
-              size: old.sizeFrom === 'camera' ? old.quantity : '', text: old.seenText || ''};
+              size: old.sizeFrom === 'camera' ? old.quantity : '', text: old.seenText || '', raw: (old.seenText || '').split(' ').filter(Boolean), heb: 0};
     if (frames.length) {
       await waitQuiet();
       await loadLabelOCR();
       if (lblWorker) {
-        for (const f of frames.slice(0, known || shop ? 1 : 4)) {
+        for (const f of frames.slice(0, known || shop ? 1 : 5)) {
           await waitQuiet();
           let r = null;
-          try { r = await readPackage(f); } catch(e){}
+          try { r = await readFrame(f); } catch(e){}
           if (!r) continue;
-          seen = seen || {guess: '', price: '', size: '', text: ''};
+          seen = seen || {guess: '', price: '', size: '', text: '', raw: [], heb: 0};
+          seen.raw = seen.raw.concat(r.raw || []); seen.heb += r.heb || 0;
           if (!seen.guess && r.guess) seen.guess = r.guess;
           if (!seen.price && r.price) seen.price = r.price;
           if (!seen.size && r.size) seen.size = r.size;
           if (r.text && r.text.length > seen.text.length) seen.text = r.text;
-          if ((known || shop || seen.guess) && seen.price && seen.size) break;
+          if ((known || shop) && seen.price && seen.size) break;
         }
       }
     }
     job.frames = null; job.photo = null;
     // 3. put it together
+    if (known && (arabic(known.name) || arabic(known.brand)) && (/^729/.test(code) || (seen && seen.heb >= 2))) known = null;
+    // not found by barcode: look the package words up among the supermarket products
+    let similar = null;
+    if (!shop && !(known && known.name) && seen && seen.raw && seen.raw.length) {
+      try { similar = await searchByWords(seen.raw.concat(seen.guess ? [seen.guess] : []), seen.size, seen.text + ' ' + seen.guess); } catch(e){}
+    }
     // Israeli shop names are full descriptions ("<brand> <product> <size>"), so they lead when present
-    const brand = known && known.brand ? known.brand : shop ? shop.maker : '';
+    const brand = known && known.brand ? known.brand : shop ? shop.maker : similar && similar.maker ? similar.maker : '';
     let shopName = shop && shop.name ? shop.name.trim() : '';
     if (shopName && shop.size) {
       // chains often cut names off mid-word ("…1 ק\""): drop the cut piece and add the size properly
@@ -1492,14 +1651,18 @@
       const hasSize = /\d/.test(cut) && cut.indexOf(shop.size.split(' ')[0]) >= 0;
       shopName = hasSize ? cut : cut + ' ' + shop.size;
     }
-    const name = shopName || (known && known.name ? known.name : seen && seen.guess ? seen.guess : '');
-    const nameFrom = shop && shop.name ? 'shops' : known && known.name ? 'db' : name ? 'camera' : '';
-    const size = known && known.quantity ? known.quantity : shop && shop.size ? shop.size : seen && seen.size ? seen.size : '';
+    const simName = similar ? (similar.confident ? similar.best.row[0] : similar.family + (seen && seen.size ? ' ' + seen.size : '')) : '';
+    const name = shopName || (known && known.name ? known.name : simName ? simName : seen && seen.guess ? seen.guess : '');
+    const nameFrom = shop && shop.name ? 'shops' : known && known.name ? 'db' : simName ? (similar.confident ? 'similar' : 'family') : name ? 'camera' : '';
+    const size = known && known.quantity ? known.quantity : shop && shop.size ? shop.size : seen && seen.size ? seen.size
+      : similar && similar.confident && similar.best.row[2] ? similar.best.row[2] : '';
     const pr = seen && seen.price ? {text: seen.price, src: 'camera'}
       : shop && shop.median ? {text: money(shop.median, 'ILS'), src: 'shops', min: shop.min, max: shop.max, chains: shop.chains, date: shop.updated}
+      : similar && similar.confident && similar.best.sameSize && similar.best.row[5] ? {text: '~' + money(similar.best.row[5], 'ILS'), src: 'similar'}
       : price && price.found && price.amount ? {text: money(price.amount, price.currency), src: 'openprices', date: price.date, store: price.store, city: price.city, count: price.count}
       : null;
-    const info = {status: 'done', label: shortLabel(nameFrom === 'shops' ? '' : brand, name, pr && pr.text), brand: brand, name: name,
+    const info = {v: 3, status: 'done', label: shortLabel(nameFrom === 'shops' || nameFrom === 'similar' || nameFrom === 'family' ? '' : brand, name, pr && pr.text), brand: brand, name: name,
+      alts: similar && !similar.confident ? similar.alts : [], heard: similar ? similar.matched : [],
       nameFrom: nameFrom, quantity: size, sizeFrom: known && known.quantity ? 'db' : shop && shop.size ? 'shops' : size ? 'camera' : '',
       maker: shop ? shop.maker : '', category: known ? known.category : '', country: gs1Country(code),
       nutri: known ? known.nutri : '', image: known ? known.image : '', source: known ? known.source : '', shops: !!shop,
@@ -1690,7 +1853,7 @@
   }
   let pass = 0, lastBox = null, lastBoxAt = 0;
   const frameBuf = []; let lastBufAt = 0;
-  window.__bwTest = {locate: locate, straighten: straighten};
+  window.__bwTest = {locate: locate, straighten: straighten, searchByWords: (w, s, t) => searchByWords(w, s, t), aroundBarcode: aroundBarcode};
   async function detectFrame(v){
     pass++;
     let box = null;
@@ -1876,7 +2039,7 @@
   try { if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {}); } catch(e){}
   if (rowEl.checked) startScanner();
   setTimeout(() => {
-    items.filter(it => isGtin(it.value) && (!it.info || it.info.status !== 'done' || it.info.country === undefined || (!it.info.name && it.info.t < Date.now() - 6 * 3600e3))).slice(0, 40).forEach(it => analyzeLater({id: it.id}));
+    items.filter(it => isGtin(it.value) && (!it.info || it.info.status !== 'done' || (it.info.v || 0) < 3 || (!it.info.name && it.info.t < Date.now() - 6 * 3600e3))).slice(0, 40).forEach(it => analyzeLater({id: it.id, photo: it.photo}));
   }, 2500);
 })();
 </script>

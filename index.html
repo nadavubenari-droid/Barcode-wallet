@@ -522,19 +522,23 @@
     if (inf.status === 'offline') { short.textContent = "Couldn't reach the product database. It will try again next time."; box.append(short); return; }
     const rows = [];
     if (inf.brand) rows.push(['Brand', inf.brand]);
+    if (inf.maker && inf.maker !== inf.brand) rows.push(['Company', inf.maker]);
     if (inf.name) rows.push(['Product', inf.name + (inf.nameFrom === 'camera' ? ' (read from the package)' : '')]);
-    if (inf.quantity) rows.push(['Size', inf.quantity]);
+    if (inf.quantity) rows.push(['Size', inf.quantity + (inf.sizeFrom === 'camera' ? ' (read from the package)' : '')]);
     if (inf.price) {
       const pr = inf.price;
       let t = pr.text;
       if (pr.src === 'camera') t += ' (price tag seen by the camera)';
+      else if (pr.src === 'shops') t += ' (typical; ' + (pr.min && pr.max && pr.min !== pr.max ? money(pr.min, 'ILS') + '–' + money(pr.max, 'ILS') + ', ' : '') + (pr.chains || 1) + (pr.chains === 1 ? ' chain' : ' chains') + (pr.date ? ', price lists of ' + pr.date : '') + ')';
       else t += ' (' + ['reported on Open Prices', pr.store, pr.city, pr.date].filter(Boolean).join(', ') + (pr.count > 1 ? '; ' + pr.count + ' reports' : '') + ')';
       rows.push(['Price', t]);
     }
     if (inf.category) rows.push(['Category', inf.category]);
     if (inf.nutri) rows.push(['Nutri-Score', inf.nutri]);
+    if (inf.country) rows.push(['Barcode from', inf.country]);
     if (inf.seenText) rows.push(['On the package', inf.seenText]);
-    short.textContent = [inf.brand, inf.name && inf.name !== inf.brand ? inf.name : '', inf.quantity, inf.price && inf.price.text].filter(Boolean).join(' · ') || 'No product details found for this barcode';
+    short.textContent = [inf.nameFrom === 'shops' ? '' : inf.brand, inf.name && inf.name !== inf.brand ? inf.name : '', inf.nameFrom === 'shops' ? '' : inf.quantity, inf.price && inf.price.text].filter(Boolean).join(' · ')
+      || (inf.country ? 'Not in the product databases yet · barcode from ' + inf.country : 'Not in the product databases yet');
     box.append(short);
     if (!rows.length) return;
     const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'more-btn';
@@ -549,7 +553,7 @@
       dl.append(dt, dd);
     }
     const src = document.createElement('div'); src.className = 'src';
-    src.textContent = 'From: ' + [inf.source ? SOURCE_NAMES[inf.source] || inf.source : '', inf.price && inf.price.src === 'openprices' ? 'Open Prices' : '', inf.seenText || inf.nameFrom === 'camera' || (inf.price && inf.price.src === 'camera') ? 'your camera' : ''].filter(Boolean).join(', ');
+    src.textContent = 'From: ' + [inf.shops ? 'Israeli supermarket price lists' : '', inf.source ? SOURCE_NAMES[inf.source] || inf.source : '', inf.price && inf.price.src === 'openprices' ? 'Open Prices' : '', inf.seenText || inf.nameFrom === 'camera' || inf.sizeFrom === 'camera' || (inf.price && inf.price.src === 'camera') ? 'your camera' : '', inf.country ? 'the barcode number' : ''].filter(Boolean).join(', ');
     dl.append(src);
     box.append(dl);
     if (inf.image && /^https:\/\//.test(inf.image)) {
@@ -1255,6 +1259,48 @@
     return {found: true, amount: +pick.price, currency: pick.currency || '', date: pick.date || '',
             store: loc.osm_name || '', city: loc.osm_address_city || '', count: (r.json && r.json.total) || list.length};
   }
+  // Israeli supermarket price lists, rebuilt every day by the repo's GitHub job (see scripts/build_products.py)
+  const IL_BASES = ['https://raw.githubusercontent.com/nadavubenari-droid/Barcode-wallet/data/', 'https://cdn.jsdelivr.net/gh/nadavubenari-droid/Barcode-wallet@data/'];
+  const ilShards = {};
+  let ilMeta = null;
+  async function ilGet(path){
+    for (const base of IL_BASES) {
+      const r = await fetchJSON(base + path);
+      if (r && r.ok && r.json) return r.json;
+    }
+    return null;
+  }
+  async function lookupIL(code){
+    const k = code.slice(-2);
+    if (!ilShards[k]) ilShards[k] = ilGet('p/' + k + '.json');
+    const shard = await ilShards[k];
+    if (!shard) { delete ilShards[k]; return null; }
+    if (!ilMeta) ilMeta = ilGet('meta.json');
+    const meta = await ilMeta;
+    const keys = [code, code.length === 12 ? '0' + code : code.replace(/^0/, '')];
+    const row = keys.map(x => shard[x]).find(Boolean);
+    if (!row) return {found: false};
+    return {found: true, name: row[0] || '', maker: row[1] || '', size: row[2] || '', min: row[3], max: row[4], median: row[5], chains: row[6] || 0,
+            updated: meta && meta.updated || ''};
+  }
+  // which country's barcode office the number was registered with (first digits)
+  function gs1Country(code){
+    if (!isGtin(code)) return '';
+    const c = code.length === 12 ? '0' + code : code.length === 8 ? '' : code.padStart(13, '0');
+    if (!c) return '';
+    const n3 = +c.slice(0, 3);
+    const T = [[0,19,'USA / Canada'],[30,39,'USA / Canada'],[60,139,'USA / Canada'],[300,379,'France'],[400,440,'Germany'],[450,459,'Japan'],[490,499,'Japan'],
+      [460,469,'Russia'],[471,471,'Taiwan'],[489,489,'Hong Kong'],[500,509,'United Kingdom'],[520,521,'Greece'],[528,528,'Lebanon'],[529,529,'Cyprus'],[539,539,'Ireland'],
+      [540,549,'Belgium / Luxembourg'],[560,560,'Portugal'],[569,569,'Iceland'],[570,579,'Denmark'],[590,590,'Poland'],[594,594,'Romania'],[599,599,'Hungary'],
+      [600,601,'South Africa'],[611,611,'Morocco'],[613,613,'Algeria'],[619,619,'Tunisia'],[621,621,'Syria'],[622,622,'Egypt'],[625,625,'Jordan'],[626,626,'Iran'],
+      [628,628,'Saudi Arabia'],[629,629,'UAE'],[640,649,'Finland'],[690,699,'China'],[700,709,'Norway'],[729,729,'Israel'],[730,739,'Sweden'],[750,750,'Mexico'],
+      [754,755,'Canada'],[760,769,'Switzerland'],[770,771,'Colombia'],[773,773,'Uruguay'],[778,779,'Argentina'],[780,780,'Chile'],[789,790,'Brazil'],
+      [800,839,'Italy'],[840,849,'Spain'],[850,850,'Cuba'],[858,858,'Slovakia'],[859,859,'Czechia'],[860,860,'Serbia'],[865,865,'Mongolia'],[867,867,'North Korea'],
+      [868,869,'Turkey'],[870,879,'Netherlands'],[880,880,'South Korea'],[885,885,'Thailand'],[888,888,'Singapore'],[890,890,'India'],[893,893,'Vietnam'],
+      [899,899,'Indonesia'],[900,919,'Austria'],[930,939,'Australia'],[940,949,'New Zealand'],[955,955,'Malaysia']];
+    const hit = T.find(([a, b]) => n3 >= a && n3 <= b);
+    return hit ? hit[2] : '';
+  }
   function money(a, cur){
     try { return new Intl.NumberFormat(undefined, {style: 'currency', currency: cur}).format(a); } catch(e){ return a + (cur ? ' ' + cur : ''); }
   }
@@ -1289,10 +1335,18 @@
     const sym = (/(₪|NIS|ש["״]ח)/i.exec(m[0]) ? '₪' : /\$/.test(m[0]) ? '$' : /€/.test(m[0]) ? '€' : /£/.test(m[0]) ? '£' : '');
     return sym + num;
   }
+  const SIZE_RE = /(\d+(?:[.,]\d+)?)\s?(ק["״]?ג|קילו(?:גרם)?|גר(?:ם|')?|ג'|מ["״]ל|ליטר|ל'|kg|gr?|ml|l)(?![A-Za-z\u0590-\u05FF])/i;
+  function findSize(text){
+    const m = SIZE_RE.exec(text || '');
+    return m ? (m[1].replace(',', '.') + ' ' + m[2]) : '';
+  }
   async function readPackage(canvas){
     const res = await lblWorker.recognize(enhance(canvas, 0), {}, {blocks: true, text: true});
     const data = (res && res.data) || {};
-    const words = wordsOf(data).filter(w => w && w.text && w.confidence >= 70 && /[A-Za-z\u0590-\u05FF]{2,}/.test(w.text) && w.bbox)
+    // keep real-looking words: Hebrew words, or confident Latin words with a vowel (drops OCR junk like "Ww")
+    const words = wordsOf(data).filter(w => w && w.text && w.bbox && (
+        (/[\u0590-\u05FF]{2,}/.test(w.text) && w.confidence >= 60) ||
+        (/^[A-Za-z][A-Za-z'’&\-]{2,}$/.test(w.text.trim()) && /[aeiouyAEIOUY]/.test(w.text) && w.confidence >= 85)))
       .map(w => ({t: w.text.replace(/[^\w\u0590-\u05FF'’\-&]/g, ''), x: w.bbox.x0, y: (w.bbox.y0 + w.bbox.y1) / 2, h: w.bbox.y1 - w.bbox.y0}))
       .filter(w => w.t.length >= 2);
     words.sort((a, b) => b.h - a.h);
@@ -1304,7 +1358,7 @@
       line.sort((a, b) => heb ? b.x - a.x : a.x - b.x);
       guess = line.slice(0, 4).map(w => w.t).join(' ').slice(0, 30);
     }
-    return {guess: guess, price: findPrice(data.text), text: words.slice(0, 12).map(w => w.t).join(' ')};
+    return {guess: guess, price: findPrice(data.text), size: findSize(data.text), text: words.slice(0, 12).map(w => w.t).join(' ')};
   }
   // ----- the queue -----
   const queue = [];
@@ -1356,48 +1410,61 @@
     if (!isGtin(code) && !(job.frames && job.frames.length) && !job.photo) return;   // nothing to look up
     setInfo(it.id, Object.assign({}, it.info || {}, {status: 'working'}));
     // 1. databases (fast, by barcode number), remembered for a week
-    let prod = null, price = null;
+    let prod = null, price = null, il = null;
     if (isGtin(code)) {
       const c = infoCache[code];
-      if (c && c.t > Date.now() - 7 * 864e5) { prod = c.prod; price = c.price; }
+      if (c && c.il !== undefined && c.t > Date.now() - 3 * 864e5) { prod = c.prod; price = c.price; il = c.il; }
       else {
-        [prod, price] = await Promise.all([lookupProduct(code), lookupPrice(code)]);
-        if (prod && price) { infoCache[code] = {prod: prod, price: price, t: Date.now()}; saveInfoCache(); }
+        [prod, price, il] = await Promise.all([lookupProduct(code), lookupPrice(code), lookupIL(code)]);
+        if (prod && price && il) { infoCache[code] = {prod: prod, price: price, il: il, t: Date.now()}; saveInfoCache(); }
       }
     }
     const known = prod && prod.found ? prod : null;
+    const shop = il && il.found ? il : null;
     // 2. the camera frames, on the phone, once scanning is quiet
     let frames = job.frames || [];
     if (!frames.length && job.photo) { const pc = await photoCanvas(job.photo); if (pc) frames = [pc]; }
     let seen = null;
+    // a re-check without camera frames keeps what the camera read last time
+    const old = it.info || {};
+    if (!frames.length && (old.seenText || old.nameFrom === 'camera' || old.sizeFrom === 'camera' || (old.price && old.price.src === 'camera')))
+      seen = {guess: old.nameFrom === 'camera' ? old.name : '', price: old.price && old.price.src === 'camera' ? old.price.text : '',
+              size: old.sizeFrom === 'camera' ? old.quantity : '', text: old.seenText || ''};
     if (frames.length) {
       await waitQuiet();
       await loadLabelOCR();
       if (lblWorker) {
-        for (const f of frames.slice(0, known ? 1 : 3)) {
+        for (const f of frames.slice(0, known || shop ? 1 : 4)) {
           await waitQuiet();
           let r = null;
           try { r = await readPackage(f); } catch(e){}
           if (!r) continue;
-          seen = seen || {guess: '', price: '', text: ''};
+          seen = seen || {guess: '', price: '', size: '', text: ''};
           if (!seen.guess && r.guess) seen.guess = r.guess;
           if (!seen.price && r.price) seen.price = r.price;
+          if (!seen.size && r.size) seen.size = r.size;
           if (r.text && r.text.length > seen.text.length) seen.text = r.text;
-          if ((known || seen.guess) && seen.price) break;
+          if ((known || shop || seen.guess) && seen.price && seen.size) break;
         }
       }
     }
     job.frames = null; job.photo = null;
     // 3. put it together
-    const brand = known ? known.brand : '';
-    const name = known && known.name ? known.name : seen && seen.guess ? seen.guess : '';
+    // Israeli shop names are full descriptions ("<brand> <product> <size>"), so they lead when present
+    const brand = known && known.brand ? known.brand : shop ? shop.maker : '';
+    const name = shop && shop.name ? shop.name : known && known.name ? known.name : seen && seen.guess ? seen.guess : '';
+    const nameFrom = shop && shop.name ? 'shops' : known && known.name ? 'db' : name ? 'camera' : '';
+    const size = known && known.quantity ? known.quantity : shop && shop.size ? shop.size : seen && seen.size ? seen.size : '';
     const pr = seen && seen.price ? {text: seen.price, src: 'camera'}
+      : shop && shop.median ? {text: money(shop.median, 'ILS'), src: 'shops', min: shop.min, max: shop.max, chains: shop.chains, date: shop.updated}
       : price && price.found && price.amount ? {text: money(price.amount, price.currency), src: 'openprices', date: price.date, store: price.store, city: price.city, count: price.count}
       : null;
-    const info = {status: 'done', label: shortLabel(brand, name, pr && pr.text), brand: brand, name: name,
-      nameFrom: known && known.name ? 'db' : name ? 'camera' : '', quantity: known ? known.quantity : '', category: known ? known.category : '',
-      nutri: known ? known.nutri : '', image: known ? known.image : '', source: known ? known.source : '', price: pr, seenText: seen ? seen.text : '', t: Date.now()};
-    if (!prod && !seen) info.status = 'offline';   // try again later
+    const info = {status: 'done', label: shortLabel(nameFrom === 'shops' ? '' : brand, name, pr && pr.text), brand: brand, name: name,
+      nameFrom: nameFrom, quantity: size, sizeFrom: known && known.quantity ? 'db' : shop && shop.size ? 'shops' : size ? 'camera' : '',
+      maker: shop ? shop.maker : '', category: known ? known.category : '', country: gs1Country(code),
+      nutri: known ? known.nutri : '', image: known ? known.image : '', source: known ? known.source : '', shops: !!shop,
+      price: pr, seenText: seen ? seen.text : '', t: Date.now()};
+    if (!prod && !il && !seen) info.status = 'offline';   // try again later
     setInfo(it.id, info);
   }
 
@@ -1762,7 +1829,7 @@
   try { if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {}); } catch(e){}
   if (rowEl.checked) startScanner();
   setTimeout(() => {
-    items.filter(it => isGtin(it.value) && (!it.info || it.info.status !== 'done')).slice(0, 40).forEach(it => analyzeLater({id: it.id}));
+    items.filter(it => isGtin(it.value) && (!it.info || it.info.status !== 'done' || (!it.info.name && it.info.t < Date.now() - 6 * 3600e3))).slice(0, 40).forEach(it => analyzeLater({id: it.id}));
   }, 2500);
 })();
 </script>

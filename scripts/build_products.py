@@ -62,6 +62,14 @@ def size_text(qty, unit):
     return f"{q:g} {u}".strip()
 
 
+def best_name(names):
+    """Chains often cut names short; prefer the fullest of the commonly used names."""
+    top = names.most_common()
+    floor = max(1, top[0][1] / 4)
+    good = [n for n, c in top if c >= floor]
+    return max(good, key=lambda n: (len(n.rstrip('"\' ')), names[n]))
+
+
 def parse(chain, path, acc):
     try:
         data = read_bytes(path)
@@ -83,7 +91,7 @@ def parse(chain, path, acc):
         if name:
             rec["names"][name] += 1
         maker = f.get("manufacturername", "").strip()
-        if maker and not re.search(r"לא ידוע|כללי|unknown", maker):
+        if maker and re.search(r"[A-Za-z\u0590-\u05FF]{2,}", maker) and not re.search(r"לא ידוע|כללי|unknown", maker):
             rec["makers"][maker] += 1
         s = size_text(f.get("quantity"), f.get("unitqty") or f.get("unitofmeasure"))
         if s:
@@ -128,7 +136,7 @@ def main():
             continue
         pr = sorted(r["prices"])
         shards[code[-2:]][code] = [
-            r["names"].most_common(1)[0][0],
+            best_name(r["names"]),
             r["makers"].most_common(1)[0][0] if r["makers"] else "",
             r["sizes"].most_common(1)[0][0] if r["sizes"] else "",
             round(pr[0], 2) if pr else None,

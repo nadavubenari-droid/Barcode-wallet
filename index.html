@@ -93,6 +93,14 @@
   .show-body{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:10px 16px 20px;text-align:center}
   .name-input{border:0;border-bottom:1.5px dashed transparent;background:none;text-align:center;font:700 26px/1.2 "Space Grotesk";width:100%;max-width:480px;padding:4px;outline:none}
   .name-input:focus{border-bottom-color:var(--line)}
+  .info{width:100%;max-width:480px;margin-top:-6px}
+  .info .short{color:var(--muted);font-size:14px}
+  .info .more-btn{background:none;border:0;color:var(--accent);font-weight:600;font-size:14px;padding:4px 8px}
+  .info dl{text-align:left;margin:8px 0 0;background:#faf7f1;border:1px solid var(--line);border-radius:14px;padding:10px 14px;display:grid;grid-template-columns:auto 1fr;gap:6px 12px;font-size:14px}
+  .info dt{color:var(--muted);font-weight:500}
+  .info dd{margin:0;word-break:break-word}
+  .info img{max-width:120px;max-height:120px;border-radius:10px;display:block;margin:10px auto 0}
+  .info .src{grid-column:1/-1;color:var(--muted);font-size:12px}
   .code-big{display:flex;align-items:center;justify-content:center;background:#fff;padding:8px}
   .code-big.bar svg{width:min(94vw,600px);height:auto}
   .code-big.qr svg{width:min(80vw,360px);height:auto}
@@ -256,6 +264,7 @@
   </div>
   <div class="show-body">
     <input id="showName" class="name-input" dir="auto" placeholder="Add a name" maxlength="60" aria-label="Name">
+    <div id="showInfo" class="info" hidden></div>
     <div id="showCode" class="code-big"></div>
     <div id="showVal" class="mono" dir="auto"></div>
     <p class="hint">Turn your screen brightness up for the scanner.</p>
@@ -298,6 +307,8 @@
     const b = {name: it.name || '', value: it.value || '', format: it.format, created: it.created};
     if (it.photo) b.photo = it.photo;
     if (it.session) b.session = it.session;
+    if (it.info) b.info = it.info;
+    if (typeof it.autoName === 'boolean') b.autoName = it.autoName;
     return b;
   }
 
@@ -419,7 +430,8 @@
     b.type = 'button'; b.className = 'card';
     b.innerHTML = '<div class="thumb"></div><div class="meta"><div class="name" dir="auto"></div><div class="val" dir="auto"></div></div><span class="chev">›</span>';
     b.querySelector('.name').textContent = it.name || 'Untitled';
-    b.querySelector('.val').textContent = it.format === 'PHOTO' ? 'Photo' : fmtLabel(it.format) + ' · ' + it.value;
+    const pre = it.info && it.info.status === 'working' ? 'Identifying… · ' : it.info && it.info.price ? it.info.price.text + ' · ' : '';
+    b.querySelector('.val').textContent = pre + (it.format === 'PHOTO' ? 'Photo' : fmtLabel(it.format) + ' · ' + it.value);
     b.querySelector('.thumb').append(codeNode(it, false));
     b.addEventListener('click', () => openShow(it.id));
     return b;
@@ -479,7 +491,7 @@
   });
 
   /* ---------- show overlay ---------- */
-  function openShow(id){ showId = id; showingPhoto = false; drawShow(); $('#show').hidden = false; document.body.classList.add('lock'); }
+  function openShow(id){ infoOpen = false; showId = id; showingPhoto = false; drawShow(); $('#show').hidden = false; document.body.classList.add('lock'); }
   function closeShow(){ commitName(); showId = null; $('#show').hidden = true; document.body.classList.remove('lock'); }
   function drawShow(){
     const it = items.find(x => x.id === showId);
@@ -493,16 +505,64 @@
     box.className = 'code-big ' + (usePhoto ? 'img' : kind(it));
     box.append(usePhoto ? photoImg(it) : codeNode(it, true));
     $('#showVal').textContent = it.format === 'PHOTO' ? '' : it.value;
+    drawInfo(it);
     const pb = $('#showPhoto');
     pb.hidden = !it.photo || kind(it) === 'img';
     pb.textContent = showingPhoto ? 'Show barcode' : 'Original photo';
     $('#showCopy').hidden = !it.value;
   }
+  let infoOpen = false;
+  function drawInfo(it){
+    const box = $('#showInfo'), inf = it.info;
+    box.textContent = '';
+    if (!inf) { box.hidden = true; return; }
+    box.hidden = false;
+    const short = document.createElement('div'); short.className = 'short'; short.dir = 'auto';
+    if (inf.status === 'working') { short.textContent = 'Identifying the product…'; box.append(short); return; }
+    if (inf.status === 'offline') { short.textContent = "Couldn't reach the product database. It will try again next time."; box.append(short); return; }
+    const rows = [];
+    if (inf.brand) rows.push(['Brand', inf.brand]);
+    if (inf.name) rows.push(['Product', inf.name + (inf.nameFrom === 'camera' ? ' (read from the package)' : '')]);
+    if (inf.quantity) rows.push(['Size', inf.quantity]);
+    if (inf.price) {
+      const pr = inf.price;
+      let t = pr.text;
+      if (pr.src === 'camera') t += ' (price tag seen by the camera)';
+      else t += ' (' + ['reported on Open Prices', pr.store, pr.city, pr.date].filter(Boolean).join(', ') + (pr.count > 1 ? '; ' + pr.count + ' reports' : '') + ')';
+      rows.push(['Price', t]);
+    }
+    if (inf.category) rows.push(['Category', inf.category]);
+    if (inf.nutri) rows.push(['Nutri-Score', inf.nutri]);
+    if (inf.seenText) rows.push(['On the package', inf.seenText]);
+    short.textContent = [inf.brand, inf.name && inf.name !== inf.brand ? inf.name : '', inf.quantity, inf.price && inf.price.text].filter(Boolean).join(' · ') || 'No product details found for this barcode';
+    box.append(short);
+    if (!rows.length) return;
+    const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'more-btn';
+    btn.textContent = infoOpen ? 'Less ▴' : 'More ▾';
+    btn.addEventListener('click', () => { infoOpen = !infoOpen; drawInfo(items.find(x => x.id === showId) || it); });
+    box.append(btn);
+    if (!infoOpen) return;
+    const dl = document.createElement('dl');
+    for (const [k, v] of rows) {
+      const dt = document.createElement('dt'); dt.textContent = k;
+      const dd = document.createElement('dd'); dd.textContent = v; dd.dir = 'auto';
+      dl.append(dt, dd);
+    }
+    const src = document.createElement('div'); src.className = 'src';
+    src.textContent = 'From: ' + [inf.source ? SOURCE_NAMES[inf.source] || inf.source : '', inf.price && inf.price.src === 'openprices' ? 'Open Prices' : '', inf.seenText || inf.nameFrom === 'camera' || (inf.price && inf.price.src === 'camera') ? 'your camera' : ''].filter(Boolean).join(', ');
+    dl.append(src);
+    box.append(dl);
+    if (inf.image && /^https:\/\//.test(inf.image)) {
+      const im = document.createElement('img'); im.src = inf.image; im.alt = ''; im.referrerPolicy = 'no-referrer';
+      im.onerror = () => im.remove();
+      box.append(im);
+    }
+  }
   function commitName(){
     const it = items.find(x => x.id === showId);
     if (!it) return;
     const v = $('#showName').value.trim();
-    if (v && v !== (it.name || '')) saveItem(Object.assign({}, it, {name: v}));
+    if (v && v !== (it.name || '')) saveItem(Object.assign({}, it, {name: v, autoName: false}));
   }
   $('#showClose').addEventListener('click', closeShow);
   $('#showName').addEventListener('change', commitName);
@@ -664,8 +724,9 @@
       if (!found) { failed++; continue; }
       if (isDup(found.value)) { dup++; continue; }
       const it = {value: found.value, format: found.format, photo: photo, session: sid};
-      it.name = defaultName(it);
+      it.name = defaultName(it); it.autoName = true;
       await saveItem(it);
+      analyzeLater({id: it.id, photo: photo});
       saved++;
     }
     const bits = [];
@@ -706,7 +767,9 @@
       {save: () => {
         const name = $('#nm').value.trim() || defaultName(it);
         closeSheet();
-        saveItem(Object.assign({}, it, {name: name}));
+        const obj = Object.assign({}, it, {name: name, autoName: !$('#nm').value.trim()});
+        saveItem(obj);
+        analyzeLater({id: obj.id, photo: obj.photo});
         toast('Saved');
       }},
       el => {
@@ -755,8 +818,10 @@
         const format = $('#tf').value || autoFormat(value);
         const it = {value: value, format: format};
         it.name = $('#tn').value.trim() || defaultName(it);
+        it.autoName = !$('#tn').value.trim();
         closeSheet();
         saveItem(it);
+        analyzeLater({id: it.id});
         toast('Saved');
       }});
   }
@@ -1140,15 +1205,206 @@
     return c;
   }
 
-  /* ---------- reading the printed numbers (for codes too blurry to scan) ---------- */
-  let ocrWorker = null, ocrLoading = null;
-  function loadOCR(){
-    if (!ocrLoading) ocrLoading = new Promise(res => {
+  /* ---------- understanding the product ----------
+     Runs in the background, after scanning, and never with an AI service:
+     1. the barcode number is looked up in the free Open Food Facts databases (name, brand, size…)
+        and in Open Prices (prices people reported);
+     2. frames from just before, during and after the scan are read on the phone for the
+        biggest words on the package and any price tag.
+     Scanning always comes first: the camera reading waits while barcodes are being read. */
+  const INFO_KEY = 'barcode-wallet-info';
+  const SOURCE_NAMES = {openfoodfacts: 'Open Food Facts', openbeautyfacts: 'Open Beauty Facts', openproductsfacts: 'Open Products Facts', openpetfoodfacts: 'Open Pet Food Facts'};
+  let infoCache = {};
+  try { infoCache = JSON.parse(localStorage.getItem(INFO_KEY) || '{}') || {}; } catch(e){}
+  const saveInfoCache = () => { try { localStorage.setItem(INFO_KEY, JSON.stringify(infoCache)); } catch(e){} };
+  const isGtin = v => /^\d{8,14}$/.test(v || '');
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  async function fetchJSON(url){
+    const ctl = new AbortController(), t = setTimeout(() => ctl.abort(), 9000);
+    try { const r = await fetch(url, {signal: ctl.signal}); return {ok: r.ok, status: r.status, json: r.ok ? await r.json() : null}; }
+    catch(e){ return null; } finally { clearTimeout(t); }
+  }
+  // null = couldn't reach the database; {found:false} = it doesn't know this barcode
+  async function lookupProduct(code){
+    const fields = 'product_name,product_name_en,product_name_he,generic_name,brands,quantity,categories,image_front_small_url,nutriscore_grade';
+    let reached = false;
+    for (const host of ['openfoodfacts', 'openbeautyfacts', 'openproductsfacts', 'openpetfoodfacts']) {
+      const r = await fetchJSON('https://world.' + host + '.org/api/v2/product/' + code + '.json?fields=' + fields);
+      if (!r) continue;
+      reached = true;
+      const j = r.json;
+      if (j && j.status === 1 && j.product) {
+        const pr = j.product;
+        const name = (pr.product_name || pr.product_name_en || pr.product_name_he || pr.generic_name || '').trim();
+        const brand = (pr.brands || '').split(',')[0].trim();
+        if (!name && !brand) continue;
+        const cats = (pr.categories || '').split(',').map(x => x.trim()).filter(x => x && !/:/.test(x));
+        return {found: true, name: name, brand: brand, quantity: (pr.quantity || '').trim(), category: cats[cats.length - 1] || '',
+                image: pr.image_front_small_url || '', nutri: /^[a-e]$/i.test(pr.nutriscore_grade || '') ? pr.nutriscore_grade.toUpperCase() : '', source: host};
+      }
+    }
+    return reached ? {found: false} : null;
+  }
+  async function lookupPrice(code){
+    const r = await fetchJSON('https://prices.openfoodfacts.org/api/v1/prices?product_code=' + code + '&order_by=-date&size=20');
+    if (!r) return null;
+    const list = (r.json && (r.json.items || r.json.results)) || [];
+    if (!list.length) return {found: false};
+    const pick = list.find(x => x.currency === 'ILS') || list[0];
+    const loc = pick.location || {};
+    return {found: true, amount: +pick.price, currency: pick.currency || '', date: pick.date || '',
+            store: loc.osm_name || '', city: loc.osm_address_city || '', count: (r.json && r.json.total) || list.length};
+  }
+  function money(a, cur){
+    try { return new Intl.NumberFormat(undefined, {style: 'currency', currency: cur}).format(a); } catch(e){ return a + (cur ? ' ' + cur : ''); }
+  }
+  // ----- reading the package with the camera (on the phone) -----
+  let lblWorker = null, lblLoading = null;
+  function loadOCRScript(){
+    return new Promise(res => {
       if (window.Tesseract) return res();
       const sc = document.createElement('script');
       sc.src = 'https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
       sc.onload = res; sc.onerror = res; document.head.append(sc);
-    }).then(async () => {
+    });
+  }
+  function loadLabelOCR(){
+    if (!lblLoading) lblLoading = loadOCRScript().then(async () => {
+      if (!window.Tesseract) return;
+      lblWorker = await Tesseract.createWorker(['eng', 'heb']);
+    }).catch(() => {});
+    return lblLoading;
+  }
+  function wordsOf(data){
+    if (data.words && data.words.length) return data.words;
+    const out = [];
+    (data.blocks || []).forEach(b => (b.paragraphs || []).forEach(pg => (pg.lines || []).forEach(l => (l.words || []).forEach(w => out.push(w)))));
+    return out;
+  }
+  const PRICE_RE = /(?:₪|NIS|ש["״]ח|\$|€|£)\s?(\d{1,4}[.,]\d{1,2})|(\d{1,4}[.,]\d{2})\s?(?:₪|NIS|ש["״]ח|\$|€|£)/i;
+  function findPrice(text){
+    const m = PRICE_RE.exec(text || '');
+    if (!m) return '';
+    const num = (m[1] || m[2]).replace(',', '.');
+    const sym = (/(₪|NIS|ש["״]ח)/i.exec(m[0]) ? '₪' : /\$/.test(m[0]) ? '$' : /€/.test(m[0]) ? '€' : /£/.test(m[0]) ? '£' : '');
+    return sym + num;
+  }
+  async function readPackage(canvas){
+    const res = await lblWorker.recognize(enhance(canvas, 0), {}, {blocks: true, text: true});
+    const data = (res && res.data) || {};
+    const words = wordsOf(data).filter(w => w && w.text && w.confidence >= 70 && /[A-Za-z\u0590-\u05FF]{2,}/.test(w.text) && w.bbox)
+      .map(w => ({t: w.text.replace(/[^\w\u0590-\u05FF'’\-&]/g, ''), x: w.bbox.x0, y: (w.bbox.y0 + w.bbox.y1) / 2, h: w.bbox.y1 - w.bbox.y0}))
+      .filter(w => w.t.length >= 2);
+    words.sort((a, b) => b.h - a.h);
+    let guess = '';
+    if (words.length) {
+      const top = words[0];
+      const line = words.filter(w => Math.abs(w.y - top.y) < top.h * 0.6 && w.h > top.h * 0.5);
+      const heb = /[\u0590-\u05FF]/.test(top.t);
+      line.sort((a, b) => heb ? b.x - a.x : a.x - b.x);
+      guess = line.slice(0, 4).map(w => w.t).join(' ').slice(0, 30);
+    }
+    return {guess: guess, price: findPrice(data.text), text: words.slice(0, 12).map(w => w.t).join(' ')};
+  }
+  // ----- the queue -----
+  const queue = [];
+  let analyzing = false;
+  function analyzeLater(job){
+    queue.push(job);
+    // only the most recent few keep their camera frames, to save memory
+    queue.slice(0, -5).forEach(j => { j.frames = []; j.photo = null; });
+    pump();
+  }
+  async function pump(){
+    if (analyzing) return;
+    const job = queue.shift();
+    if (!job) return;
+    analyzing = true;
+    try { await analyze(job); } catch(e){}
+    analyzing = false;
+    setTimeout(pump, 30);
+  }
+  // scanning first: wait while barcodes are being read
+  async function waitQuiet(){
+    while (scanning && (Date.now() - lastReadAt < 1200 || ocrBusy)) await sleep(250);
+  }
+  function setInfo(id, info){
+    const it = items.find(x => x.id === id);
+    if (!it) return;
+    const upd = Object.assign({}, it, {info: info});
+    const auto = it.autoName === true || (it.autoName === undefined && /…/.test(it.name || ''));
+    if (auto && info.status === 'done' && info.label) {
+      const suffix = ((it.name || '').match(/ \(\d+\)$/) || [''])[0];
+      upd.name = info.label + suffix;
+      upd.autoName = true;
+    }
+    saveItem(upd);
+  }
+  function shortLabel(brand, name, price){
+    if (brand && name && name.toLowerCase().indexOf(brand.toLowerCase()) >= 0) brand = '';
+    let t = [brand, name].filter(Boolean).join(' ');
+    if (t.length > 32) t = t.slice(0, 31).trim() + '…';
+    return price ? (t ? t + ' · ' + price : price) : t;
+  }
+  function photoCanvas(dataUrl){
+    return new Promise(res => { const i = new Image(); i.onload = () => res(toCanvas(i, 1200)); i.onerror = () => res(null); i.src = dataUrl; });
+  }
+  async function analyze(job){
+    let it = items.find(x => x.id === job.id);
+    if (!it) return;
+    const code = it.value;
+    if (!isGtin(code) && !(job.frames && job.frames.length) && !job.photo) return;   // nothing to look up
+    setInfo(it.id, Object.assign({}, it.info || {}, {status: 'working'}));
+    // 1. databases (fast, by barcode number), remembered for a week
+    let prod = null, price = null;
+    if (isGtin(code)) {
+      const c = infoCache[code];
+      if (c && c.t > Date.now() - 7 * 864e5) { prod = c.prod; price = c.price; }
+      else {
+        [prod, price] = await Promise.all([lookupProduct(code), lookupPrice(code)]);
+        if (prod && price) { infoCache[code] = {prod: prod, price: price, t: Date.now()}; saveInfoCache(); }
+      }
+    }
+    const known = prod && prod.found ? prod : null;
+    // 2. the camera frames, on the phone, once scanning is quiet
+    let frames = job.frames || [];
+    if (!frames.length && job.photo) { const pc = await photoCanvas(job.photo); if (pc) frames = [pc]; }
+    let seen = null;
+    if (frames.length) {
+      await waitQuiet();
+      await loadLabelOCR();
+      if (lblWorker) {
+        for (const f of frames.slice(0, known ? 1 : 3)) {
+          await waitQuiet();
+          let r = null;
+          try { r = await readPackage(f); } catch(e){}
+          if (!r) continue;
+          seen = seen || {guess: '', price: '', text: ''};
+          if (!seen.guess && r.guess) seen.guess = r.guess;
+          if (!seen.price && r.price) seen.price = r.price;
+          if (r.text && r.text.length > seen.text.length) seen.text = r.text;
+          if ((known || seen.guess) && seen.price) break;
+        }
+      }
+    }
+    job.frames = null; job.photo = null;
+    // 3. put it together
+    const brand = known ? known.brand : '';
+    const name = known && known.name ? known.name : seen && seen.guess ? seen.guess : '';
+    const pr = seen && seen.price ? {text: seen.price, src: 'camera'}
+      : price && price.found && price.amount ? {text: money(price.amount, price.currency), src: 'openprices', date: price.date, store: price.store, city: price.city, count: price.count}
+      : null;
+    const info = {status: 'done', label: shortLabel(brand, name, pr && pr.text), brand: brand, name: name,
+      nameFrom: known && known.name ? 'db' : name ? 'camera' : '', quantity: known ? known.quantity : '', category: known ? known.category : '',
+      nutri: known ? known.nutri : '', image: known ? known.image : '', source: known ? known.source : '', price: pr, seenText: seen ? seen.text : '', t: Date.now()};
+    if (!prod && !seen) info.status = 'offline';   // try again later
+    setInfo(it.id, info);
+  }
+
+  /* ---------- reading the printed numbers (for codes too blurry to scan) ---------- */
+  let ocrWorker = null, ocrLoading = null;
+  function loadOCR(){
+    if (!ocrLoading) ocrLoading = loadOCRScript().then(async () => {
       if (!window.Tesseract) return;
       const w = await Tesseract.createWorker('eng');
       await w.setParameters({tessedit_char_whitelist: '0123456789 ', tessedit_pageseg_mode: '6'});
@@ -1326,6 +1582,7 @@
     return null;
   }
   let pass = 0, lastBox = null, lastBoxAt = 0;
+  const frameBuf = []; let lastBufAt = 0;
   window.__bwTest = {locate: locate, straighten: straighten};
   async function detectFrame(v){
     pass++;
@@ -1369,6 +1626,7 @@
       busy = true;
       const t0 = Date.now();
       try { const r = await detectFrame(v); trackScene(r, t0); if (r) { lastReadAt = Date.now(); onCode(r, v, t0); } else candN = 0; } catch(e){}
+      if (Date.now() - lastBufAt > 400) { lastBufAt = Date.now(); try { frameBuf.push(toCanvas(v, 960)); if (frameBuf.length > 3) frameBuf.shift(); } catch(e){} }
       busy = false;
     }
     loopT = setTimeout(loop, 15);
@@ -1456,7 +1714,14 @@
     try { photo = toCanvas(v, 760).toDataURL('image/jpeg', 0.72); } catch(e){}
     const it = {value: r.value, format: r.format, photo: photo, session: sessionId};
     it.name = defaultName(it) + (n > 1 ? ' (' + n + ')' : '');
+    it.autoName = true;
     saveItem(it);
+    // frames for working out the product later: this one, the last few before it, and two after
+    const job = {id: it.id, frames: []};
+    try { job.frames = [toCanvas(v, 960)].concat(frameBuf.slice().reverse()); } catch(e){}
+    setTimeout(() => { if (scanning && job.frames) try { job.frames.splice(1, 0, toCanvas($('#vid'), 960)); } catch(e){} }, 450);
+    setTimeout(() => { if (scanning && job.frames) try { job.frames.splice(2, 0, toCanvas($('#vid'), 960)); } catch(e){} }, 900);
+    analyzeLater(job);
     sessionCount++;
     $('#scanCount').textContent = sessionCount + ' saved';
     setMsg((n > 1 ? 'Saved again ×' + n + ' · ' : 'Saved ' + fmtLabel(r.format) + ' · ') + r.value + (fromNumbers ? ' (read from the numbers)' : ''));
@@ -1496,6 +1761,9 @@
   unlockAudio();   // works straight away wherever the browser allows sound without a tap
   try { if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {}); } catch(e){}
   if (rowEl.checked) startScanner();
+  setTimeout(() => {
+    items.filter(it => isGtin(it.value) && (!it.info || it.info.status !== 'done')).slice(0, 40).forEach(it => analyzeLater({id: it.id}));
+  }, 2500);
 })();
 </script>
 </body>

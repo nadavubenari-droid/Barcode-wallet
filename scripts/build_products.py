@@ -301,7 +301,18 @@ def main():
             pr = m["price"]
             shards[code[-2:]][code] = [m["name"], m["maker"], m["size"], pr, pr, pr, 0, "", m["kind"], m["extra"]]
     os.makedirs(os.path.join(OUT, "p"), exist_ok=True)
-    write_index({c: row for sh in shards.values() for c, row in sh.items()})
+    table = {c: row for sh in shards.values() for c, row in sh.items()}
+    write_index(table)
+    # neighbours: products grouped by the first 8 digits of the barcode (the maker's number lives there)
+    groups = collections.defaultdict(list)
+    for c, row in table.items():
+        if len(c) == 13:
+            groups[c[:8]].append([c, row[0][:48], row[1], row[2]])
+    os.makedirs(os.path.join(OUT, "n"), exist_ok=True)
+    for k, v in groups.items():
+        with open(os.path.join(OUT, "n", f"{k}.json"), "w", encoding="utf-8") as fh:
+            json.dump(sorted(v), fh, ensure_ascii=False, separators=(",", ":"))
+    print(f"Neighbour groups: {len(groups)}")
     total = 0
     for k, v in shards.items():
         total += len(v)

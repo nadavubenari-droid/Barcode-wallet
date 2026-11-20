@@ -6,7 +6,8 @@
 <title>Barcode Wallet</title>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
-<meta name="theme-color" content="#f3efe7">
+<meta name="theme-color" content="#0e0d0b">
+<meta name="color-scheme" content="dark">
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -217,6 +218,42 @@
   @keyframes spin{to{transform:rotate(360deg)}}
   @keyframes fade{from{opacity:0}}
   @keyframes up{from{transform:translateY(30px);opacity:.5}}
+  /* ---------- dark theme: dim, battery-friendly screens ----------
+     Barcodes themselves stay on white, because checkout scanners need dark bars on white. */
+  :root{--bg:#0e0d0b;--card:#1a1916;--ink:#f1ede5;--muted:#a39d91;--line:#2d2a25;--accent:#ff6a33;--accent-ink:#fff;--danger:#ff6b57;--soft:#252320}
+  html{color-scheme:dark}
+  .btn{background:var(--soft)}
+  .btn.ghost{border-color:var(--line)}
+  .btn.danger{background:transparent;border-color:#5a2a22}
+  .btn.big{box-shadow:0 8px 24px -12px rgba(255,106,51,.5)}
+  .pill{background:var(--soft)}
+  .sw{background:#3a3631}
+  .card:active,.tile-main:active{background:#22201c}
+  .chev{color:#5d574d}
+  .count-badge{background:var(--soft)}
+  .folder-ic{background:#3a1f12}
+  .reel-btn{background:#f1ede5;color:#0e0d0b}
+  .field input,.field select{background:#121110;color:var(--ink);border-color:var(--line)}
+  .warn{background:#3a2e10;color:#ffd27a !important}
+  .info dl{background:#151412;border-color:var(--line)}
+  .del-btn{background:#2a1714;border-color:#5a2a22}
+  .tile-del{background:rgba(14,13,11,.82);color:#ff8a78}
+  .tile-num{border:2px solid rgba(241,237,229,.9)}
+  .avatar,.collage,.thumb{border-color:var(--line)}
+  #toast{background:#f1ede5;color:#0e0d0b}
+  .toast-btn{color:#d9480f}
+  #studyBar{background:#2a2723;color:var(--ink)}
+  .spinner{border-color:#33302a;border-top-color:var(--accent)}
+  #backdrop{background:rgba(0,0,0,.6)}
+  #show{background:var(--bg)}
+  #show .code-big{background:#fff;border-radius:18px;padding:16px}
+  .name-input{color:var(--ink)}
+  /* anything drawn on the white barcode backgrounds stays dark */
+  .avatar .nocode,.code-big .nocode,.thumb .nocode,.tile-pic .nocode,.preview .nocode,.slide .nocode{color:#1a1814}
+  /* reel mode stays white for the register's scanner */
+  #reel{background:#fff;color:#1a1814}
+  #reel .btn.ghost{color:#1a1814;border-color:#ddd5c6;background:#fff}
+  #reel .reel-name,#reel .fmt{color:#7a7468}
 </style>
 </head>
 <body>

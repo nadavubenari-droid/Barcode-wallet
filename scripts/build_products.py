@@ -62,6 +62,52 @@ def size_text(qty, unit):
     return f"{q:g} {u}".strip()
 
 
+# ---- word index, so the app can find products by words read off the package ----
+# (the app has the same normalisation in JavaScript: keep the two in step)
+FINAL = str.maketrans("םןץףך", "מנצפכ")
+UNITS = {u.translate(FINAL) for u in 'גרם גר מל ליטר ל קג ק ג יח יחידות יחידה ml g gr kg l מ סמ cm x'.split()}
+SHARDS = 64
+
+
+def norm_tokens(text):
+    s = (text or "").lower()
+    s = re.sub("[\u0591-\u05C7]", "", s)
+    s = re.sub("[\"'״׳`]", "", s)
+    s = s.translate(FINAL).replace("דוקטור", "דר")
+    out = []
+    for t in re.findall("[א-תa-z0-9]+", s):
+        if len(t) < 2 or t.isdigit() or t in UNITS or re.fullmatch(r"\d+[a-zא-ת]{0,3}", t):
+            continue
+        out.append(t)
+    return out
+
+
+def shard_of(token):
+    h = 0x811C9DC5
+    for ch in token:
+        h ^= ord(ch)
+        h = (h * 16777619) & 0xFFFFFFFF
+    return h % SHARDS
+
+
+def write_index(table):
+    post = collections.defaultdict(set)
+    for code, row in table.items():
+        for t in set(norm_tokens(row[0] + " " + (row[1] or ""))):
+            post[t].add(code)
+    vocab = {t: len(c) for t, c in post.items()}
+    shards = collections.defaultdict(dict)
+    for t, codes in post.items():
+        shards[shard_of(t)][t] = sorted(codes)[:300]
+    os.makedirs(os.path.join(OUT, "t"), exist_ok=True)
+    for k, v in shards.items():
+        with open(os.path.join(OUT, "t", f"{k}.json"), "w", encoding="utf-8") as fh:
+            json.dump(v, fh, ensure_ascii=False, separators=(",", ":"))
+    with open(os.path.join(OUT, "vocab.json"), "w", encoding="utf-8") as fh:
+        json.dump(vocab, fh, ensure_ascii=False, separators=(",", ":"))
+    print(f"Index: {len(vocab)} words")
+
+
 def best_name(names):
     """Chains often cut names short; prefer the fullest of the commonly used names."""
     top = names.most_common()
@@ -145,6 +191,7 @@ def main():
             len(r["chains"]),
         ]
     os.makedirs(os.path.join(OUT, "p"), exist_ok=True)
+    write_index({c: row for sh in shards.values() for c, row in sh.items()})
     total = 0
     for k, v in shards.items():
         total += len(v)

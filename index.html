@@ -554,7 +554,10 @@
     if (inf.brand) rows.push(['Brand', inf.brand]);
     if (inf.maker && inf.maker !== inf.brand) rows.push(['Company', inf.maker]);
     if (inf.name) rows.push(['Product', iso(inf.name) + (inf.nameFrom === 'camera' ? ' (read from the package)' : inf.nameFrom === 'similar' ? ' (closest match to the words on the package)' : inf.nameFrom === 'family' ? ' (brand / product line read from the package)' : inf.nameFrom === 'clues' ? ' (worked out from the clues below)' : '')]);
+    if (inf.title && inf.nameFrom === 'clues') rows.push(['Read on the box', iso(inf.title)]);
+    if (inf.specs && inf.specs.length) rows.push(['Specs', joinIso(inf.specs, '\n')]);
     if (inf.why && inf.why.length) rows.push(['Clues', joinIso(inf.why, '\n')]);
+    if (inf.storeCode) rows.push(['Barcode type', 'A store / internal code, not a product barcode, so product databases can’t know it — the box itself was read instead']);
     if (inf.colour && !(inf.why || []).some(w => /Colour/.test(w))) rows.push(['Colour', inf.colour]);
     if (inf.company) rows.push(['Company (from the barcode)', inf.company]);
     if (inf.neighbours && inf.neighbours.length) rows.push(['Same company makes', joinIso(inf.neighbours, '\n')]);
@@ -1518,19 +1521,27 @@
     return c;
   }
   // read one camera frame every way that might work, keep the best reading
+  // Text can be at any angle, even upside down: try the picture lined up with the barcode
+  // (both ways up), the area around the barcode, and the whole picture in all four turns.
   async function readFrame(f){
     let box = null;
     try { box = locate(f); } catch(e){}
-    const tries = box ? [() => aroundBarcode(f, box, false), () => aroundBarcode(f, box, true)]
-                      : [() => upscale(f, 1600), () => upscale(rotated(f, 90), 1600), () => upscale(rotated(f, -90), 1600)];
-    let best = null;
+    const deg = box ? -box.th * 180 / Math.PI : 0;
+    const tries = [];
+    if (box) tries.push(() => upscale(rotated(f, deg), 1800), () => upscale(rotated(f, deg + 180), 1800),
+                        () => aroundBarcode(f, box, false), () => aroundBarcode(f, box, true));
+    tries.push(() => upscale(f, 1800), () => upscale(rotated(f, 180), 1800), () => upscale(rotated(f, 90), 1800), () => upscale(rotated(f, -90), 1800));
+    let best = null, all = [];
     for (const make of tries) {
       await waitQuiet();
       let r = null;
       try { r = await readPackage(make()); } catch(e){}
-      if (r && (!best || r.heb > best.heb)) best = r;
-      if (best && best.heb >= 4) break;
+      if (!r) continue;
+      all = all.concat(r.raw || []);
+      if (!best || r.score > best.score) best = r;
+      if (best.score >= 12) break;     // a clear reading: no need to try more angles
     }
+    if (best) best.raw = (best.raw || []).concat(all);   // every angle's words help the search
     return best;
   }
   /* ----- putting the clues together ("what does it seem to be?") -----
@@ -1548,12 +1559,24 @@
     {k: 'repellent', name: 'Insect repellent', he: ['דוחה', 'יתושים'], re: /icaridin|\bdeet\b|repellent|דוחה יתושים|יתושים/i, why: 'insect-repellent words'},
     {k: 'freshener', name: 'Air freshener', he: ['מטהר', 'אוויר'], re: /air freshener|מטהר אוויר|ריח לבית/i, why: 'air-freshener words'},
     {k: 'cleaner', name: 'Household cleaner', he: ['ניקוי'], re: /cleaner|ניקוי|אקונומיקה|sodium hypochlorite|degreaser|מסיר שומנים|נוזל כלים/i, why: 'cleaning words or ingredients'},
+    {k: 'earphones', name: 'earphones', he: ['אוזניות'], re: /earphone|ear ?buds?|headphone|headset|in-?ear|אוזניות|\btws\b|a2dp|hfp/i, why: '"earphone" / headphone words or audio profiles (A2DP, HFP)'},
+    {k: 'speaker', name: 'speaker', he: ['רמקול'], re: /speaker|רמקול|soundbar/i, why: '"speaker" on the box'},
+    {k: 'charger', name: 'charger / cable', he: ['מטען', 'כבל'], re: /charger|מטען|charging cable|usb-?c cable|lightning cable|כבל|wall adapter|adapter \d+w/i, why: 'charger or cable words'},
+    {k: 'powerbank', name: 'power bank', he: ['סוללה', 'ניידת'], re: /power ?bank|סוללה ניידת|מטען נייד/i, why: '"power bank" on the box'},
+    {k: 'watch', name: 'smartwatch / fitness band', he: ['שעון', 'חכם'], re: /smart ?watch|שעון חכם|fitness (band|tracker)|heart rate/i, why: 'smartwatch words'},
+    {k: 'phoneacc', name: 'phone accessory', he: ['כיסוי', 'מגן'], re: /phone case|כיסוי לטלפון|screen protector|מגן מסך|tempered glass/i, why: 'phone-accessory words'},
+    {k: 'computer', name: 'computer accessory', he: ['עכבר', 'מקלדת'], re: /\bmouse\b|keyboard|עכבר|מקלדת|\bdpi\b|webcam/i, why: 'mouse/keyboard words'},
+    {k: 'batteries', name: 'batteries', he: ['סוללות'], re: /\b(aa|aaa)\b.*batter|alkaline|סוללות|lithium coin|cr2032/i, why: 'battery words'},
+    {k: 'bulb', name: 'light bulb', he: ['נורה', 'נורת'], re: /led bulb|\blumens?\b|נורת|נורה|\be27\b|\be14\b/i, why: 'light-bulb words'},
+    {k: 'toy', name: 'toy', he: ['משחק'], re: /\bages? \d+\+|\b\d+\+ years|משחק|צעצוע|toy/i, why: 'toy / age words'},
+    {k: 'household', name: 'household paper / bags', he: ['נייר', 'שקיות'], re: /toilet (paper|tissue)|נייר טואלט|מגבות נייר|paper towel|garbage bags?|trash bags?|שקיות אשפה|ממחטות/i, why: 'household-paper or bag words'},
     {k: 'medicine', name: 'Medicine', he: ['טבליות'], re: /tablets|טבליות|כמוסות|capsules|active ingredient|חומר פעיל|\d+ ?mg\b/i, why: 'medicine words (tablets, mg, active ingredient)'},
     {k: 'food', name: 'Food or drink', he: [], re: /ערכים תזונתיים|nutrition|calories|קלוריות|חלבונים|פחמימות|carbohydrate|ingredients:? sugar|סוכר/i, why: 'a nutrition table'},
     {k: 'lotion', name: 'Cream / lotion', he: ['קרם'], re: /\bcream\b|lotion|קרם|תחליב|moistur|לחות/i, why: '"cream" or "lotion" on the label'},
     {k: 'cosmetic', name: 'Skin or body care product', he: [], re: /\baqua\b|aloe barbadensis|tocopheryl|glycerin|parfum|phenoxyethanol|potassium sorbate|sodium benzoate|dimethicone|אלוורה/i, why: 'cosmetic ingredients (aqua, aloe, vitamin E…)'}
   ];
   const FORMS = [
+    {k: 'bt', name: 'Bluetooth', front: true, he: ['בלוטוס'], re: /bluetooth|\bbt\b|wireless|אלחוטי|בלוטוס/i, why: '"Bluetooth" / "BT" (BT = Bluetooth) or "wireless"'},
     {k: 'spray', name: 'spray', he: ['ספריי', 'תרסיס'], re: /spray|ספריי|תרסיס|aerosol|butane|isobutane|propane|propellant|\bmist\b|מתז/i, why: 'spray words or propellant gases'},
     {k: 'roll', name: 'roll-on', he: ['רול'], re: /roll[- ]?on|רול ?און/i, why: '"roll-on" on the label'},
     {k: 'stick', name: 'stick', he: ['סטיק'], re: /\bstick\b|סטיק/i, why: '"stick" on the label'},
@@ -1606,9 +1629,27 @@
     if (form) why.push('Form — ' + form.name + ': ' + form.why);
     if (size) why.push('Size ' + size + (/מ["״]?ל|ml|ליטר|ל'|\bl\b/i.test(size) ? ' → it holds a liquid' : /ג|גר|kg|g\b|ק["״]?ג/i.test(size) ? ' → sold by weight' : ''));
     if (colour) why.push('Colour around the barcode: ' + colour);
+    const quals = [];
+    if (/\bsports?\b|ספורט/i.test(t)) quals.push('sports');
+    if (/\bkids?\b|children|לילדים/i.test(t)) quals.push("kids'");
     let desc = kind ? kind.name : '';
-    if (form && desc) desc += ' ' + form.name; else if (form) desc = form.name.charAt(0).toUpperCase() + form.name.slice(1);
-    return {kind: kind, form: form, desc: desc, why: why, cosmetic: kinds.some(x => x.k.k === 'cosmetic')};
+    if (desc && quals.length && kind && !/^[A-Z]/.test(kind.name)) desc = quals.join(' ') + ' ' + desc;
+    if (form && desc) desc = form.front ? form.name + ' ' + desc : desc + ' ' + form.name;
+    else if (form) desc = form.name.charAt(0).toUpperCase() + form.name.slice(1);
+    if (desc) desc = desc.charAt(0).toUpperCase() + desc.slice(1);
+    // technical details printed on the box
+    const specs = [];
+    const sp = (re, f) => { const m = re.exec(t); if (m) specs.push(f(m)); };
+    sp(/bluetooth[^0-9v]{0,12}v?\s?(\d\.\d)|version[:\s]*v\s?(\d\.\d)/i, m => 'Bluetooth ' + (m[1] || m[2]));
+    sp(/(\d{2,5})\s?mah/i, m => 'battery ' + m[1] + ' mAh');
+    sp(/play(?:ing)?\s*time[:\s]*(\d{1,3})\s?h/i, m => m[1] + ' h playing');
+    sp(/talk\s*time[:\s]*(\d{1,3})\s?h/i, m => m[1] + ' h talk');
+    sp(/standby\s*time[:\s]*(\d{1,4})\s?h/i, m => m[1] + ' h standby');
+    sp(/\b(ip[x\d]\d)\b/i, m => m[1].toUpperCase() + ' water resistance');
+    sp(/(\d{1,3})\s?w\b(?!h)/i, m => m[1] + ' W');
+    sp(/net\s*weight[:\s]*(\d+(?:\.\d+)?)\s?(g|kg)/i, m => m[1] + ' ' + m[2] + ' net weight');
+    sp(/\b(black|white|blue|red|pink|green|grey|gray|silver|gold|purple|שחור|לבן|כחול|אדום|ורוד|ירוק|אפור)\b/i, m => 'colour: ' + m[1].toLowerCase());
+    return {kind: kind, form: form, desc: desc, why: why, specs: specs, cosmetic: kinds.some(x => x.k.k === 'cosmetic')};
   }
   // products in the supermarket table that look like the same kind of thing
   async function similarProducts(clues, sizeText){
@@ -1752,21 +1793,30 @@
     // keep real-looking words: Hebrew words, or confident Latin words with a vowel (drops OCR junk like "Ww")
     const words = wordsOf(data).filter(w => w && w.text && w.bbox && (
         (/[\u0590-\u05FF]{2,}/.test(w.text) && w.confidence >= 60) ||
-        (/^[A-Za-z][A-Za-z'’&\-]{2,}$/.test(w.text.trim()) && /[aeiouyAEIOUY]/.test(w.text) && w.confidence >= 85)))
+        (/^[A-Za-z][A-Za-z'’&\-]{2,}$/.test(w.text.trim()) && /[aeiouyAEIOUY]/.test(w.text) && w.confidence >= 80) ||
+        (/^[A-Z0-9][A-Z0-9\-]{1,5}$/.test(w.text.trim()) && /[A-Z]/.test(w.text) && w.confidence >= 85)))
       .map(w => ({t: w.text.replace(/[^\w\u0590-\u05FF'’\-&]/g, ''), x: w.bbox.x0, y: (w.bbox.y0 + w.bbox.y1) / 2, h: w.bbox.y1 - w.bbox.y0}))
       .filter(w => w.t.length >= 2);
     words.sort((a, b) => b.h - a.h);
     let guess = '';
     if (words.length) {
-      const top = words[0];
-      const line = words.filter(w => Math.abs(w.y - top.y) < top.h * 0.6 && w.h > top.h * 0.5);
-      const heb = /[\u0590-\u05FF]/.test(top.t);
-      line.sort((a, b) => heb ? b.x - a.x : a.x - b.x);
-      guess = line.slice(0, 4).map(w => w.t).join(' ').slice(0, 30);
+      // group the big words into lines, then read the biggest lines top to bottom
+      const big = words.filter(w => w.h >= words[0].h * 0.55);
+      const lines = [];
+      for (const w of big.slice().sort((a, b) => a.y - b.y)) {
+        const ln = lines.find(l => Math.abs(l.y - w.y) < Math.max(l.h, w.h) * 0.6);
+        if (ln) { ln.w.push(w); ln.h = Math.max(ln.h, w.h); } else lines.push({y: w.y, h: w.h, w: [w]});
+      }
+      guess = lines.slice(0, 3).map(l => {
+        const heb = l.w.some(w => /[\u0590-\u05FF]/.test(w.t));
+        return l.w.sort((a, b) => heb ? b.x - a.x : a.x - b.x).map(w => w.t).join(' ');
+      }).join(' ').split(' ').slice(0, 6).join(' ').slice(0, 40);
     }
     const raw = wordsOf(data).filter(w => w && w.text && w.confidence >= 40).map(w => w.text);
     const heb = raw.filter(t => /[\u05D0-\u05EA]{2,}/.test(t)).length;
-    return {guess: guess, price: findPrice(data.text), size: findSize(data.text), text: words.slice(0, 12).map(w => w.t).join(' '), raw: raw, heb: heb};
+    const score = wordsOf(data).filter(w => w && w.text && w.confidence >= 70 && /[A-Za-z\u05D0-\u05EA]{2,}/.test(w.text) && w.text.trim().length >= 3).length;
+    return {guess: guess, price: findPrice(data.text), size: findSize(data.text), text: words.slice(0, 12).map(w => w.t).join(' '), raw: raw, heb: heb, score: score,
+            full: String(data.text || '')};
   }
   /* ----- studying the recorded video ("look again and again") -----
      Pass 1: the moments around each scan. Pass 2 (products still not identified): a wider
@@ -1972,7 +2022,7 @@
   function shortLabel(brand, name, price){
     if (brand && name && name.toLowerCase().indexOf(brand.toLowerCase()) >= 0) brand = '';
     let t = [brand, name].filter(Boolean).join(' ');
-    if (t.length > 32) t = t.slice(0, 31).trim() + '…';
+    if (t.length > 48) t = t.slice(0, 47).trim() + '…';
     return joinIso([t, price], ' · ');
   }
   function photoCanvas(dataUrl){
@@ -2028,6 +2078,7 @@
           seen.raw = seen.raw.concat(r.raw || []); seen.heb += r.heb || 0;
           if (!seen.guess && r.guess) seen.guess = r.guess;
           if (!seen.price && r.price) seen.price = r.price;
+          if (r.full && r.full.length > (seen.full || '').length) seen.full = r.full;
           if (!seen.size && r.size) seen.size = r.size;
           if (r.text && r.text.length > seen.text.length) seen.text = r.text;
           if ((known || shop) && seen.price && seen.size) break;
@@ -2056,10 +2107,10 @@
     }
     // still unknown: reason from the clues
     let clues = null, alike = null, neighbours = null;
-    if (!shop && !(known && known.name) && isGtin(code)) {
-      const allText = seen ? (seen.raw || []).join(' ') + ' ' + seen.text : '';
+    if (!shop && !(known && known.name) && (isGtin(code) || seen)) {
+      const allText = seen ? (seen.raw || []).join(' ') + ' ' + seen.text + ' ' + (seen.full || '') : '';
       clues = readClues(allText, seen && seen.size, colour);
-      try { neighbours = await barcodeNeighbours(code); } catch(e){}
+      if (isGtin(code)) try { neighbours = await barcodeNeighbours(code); } catch(e){}
       try { alike = await similarProducts(clues, seen && seen.size); } catch(e){}
     }
     // Israeli shop names are full descriptions ("<brand> <product> <size>"), so they lead when present
@@ -2075,7 +2126,8 @@
     let clueName = '';
     if (clues && clues.desc) {
       const who = (similar && !similar.confident && similar.family) || (neighbours && neighbours.maker) || '';
-      clueName = joinIso([who, clues.desc, seen && seen.size], ' · ');
+      const title = seen && seen.guess && seen.guess.toLowerCase() !== clues.desc.toLowerCase() ? seen.guess : '';
+      clueName = joinIso([who, clues.desc, title, seen && seen.size], ' · ');
     }
     const name = shopName || (known && known.name ? known.name : simName && (!clueName || similar.confident) ? simName : clueName ? clueName : seen && seen.guess ? seen.guess : '');
     const nameFrom = shop && shop.name ? 'shops' : known && known.name ? 'db' : simName && name === simName ? (similar.confident ? 'similar' : 'family') : clueName && name === clueName ? 'clues' : name ? 'camera' : '';
@@ -2089,12 +2141,13 @@
       : upc && upc.found && upc.low ? {text: money(upc.low, 'USD') + (upc.high > upc.low ? '–' + money(upc.high, 'USD') : ''), src: 'upc'}
       : alike && alike.low ? {text: '~' + money(alike.low, 'ILS') + (alike.high > alike.low ? '–' + money(alike.high, 'ILS') : ''), src: 'alike', same: alike.sameSize}
       : null;
-    const info = {v: 6, status: 'done', label: shortLabel(nameFrom === 'shops' || nameFrom === 'similar' || nameFrom === 'family' || nameFrom === 'clues' ? '' : brand, name, pr && pr.text), brand: brand, name: name,
+    const info = {v: 7, status: 'done', label: shortLabel(nameFrom === 'shops' || nameFrom === 'similar' || nameFrom === 'family' || nameFrom === 'clues' ? '' : brand, name, pr && pr.text), brand: brand, name: name,
       alts: similar && !similar.confident ? similar.alts : [], heard: similar ? similar.matched : [],
       nameFrom: nameFrom, quantity: size, sizeFrom: known && known.quantity ? 'db' : shop && shop.size ? 'shops' : size ? 'camera' : '',
       maker: shop ? shop.maker : '', category: known ? known.category : '', country: gs1Country(code),
       where: shop ? shop.where : [], kind: shop ? shop.kind : '', extra: shop ? shop.extra : '',
-      colour: colour, why: clues ? clues.why : [], looksLike: clues ? clues.desc : '',
+      colour: colour, why: clues ? clues.why : [], looksLike: clues ? clues.desc : '', specs: clues ? clues.specs : [],
+      title: seen && seen.guess ? seen.guess : '', storeCode: !isGtin(code),
       neighbours: neighbours ? neighbours.names : [], company: neighbours && neighbours.maker ? neighbours.maker : '',
       alike: alike ? alike.items : [],
       nutri: known ? known.nutri : '', image: known ? known.image : '', source: known ? known.source : '', shops: !!shop,
@@ -2482,7 +2535,7 @@
   try { if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {}); } catch(e){}
   if (rowEl.checked) startScanner();
   setTimeout(() => {
-    items.filter(it => isGtin(it.value) && (!it.info || it.info.status !== 'done' || (it.info.v || 0) < 6 || (!it.info.name && it.info.t < Date.now() - 6 * 3600e3))).slice(0, 40).forEach(it => analyzeLater({id: it.id, photo: it.photo}));
+    items.filter(it => (isGtin(it.value) || it.photo) && (!it.info || it.info.status !== 'done' || (it.info.v || 0) < 7 || (!it.info.name && it.info.t < Date.now() - 6 * 3600e3))).slice(0, 40).forEach(it => analyzeLater({id: it.id, photo: it.photo}));
   }, 2500);
 })();
 </script>

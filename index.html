@@ -125,6 +125,14 @@
   .chip.on{background:#ffd23d;color:#000}
   .scan-msg{position:absolute;left:50%;bottom:34px;transform:translateX(-50%);background:rgba(0,0,0,.6);color:#fff;padding:12px 18px;border-radius:14px;font-weight:500;max-width:90vw;text-align:center;backdrop-filter:blur(6px);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   @keyframes laser{from{top:18%}to{top:82%}}
+  .reel-btn{grid-column:1/-1;background:var(--ink);color:#fff}
+  #reel{position:fixed;inset:0;background:#fff;z-index:22;display:flex;flex-direction:column}
+  #reel[hidden]{display:none}
+  .reel-stage{flex:1;display:flex;align-items:center;justify-content:center;padding:10px;min-height:0}
+  .reel-stage .slide{display:none}
+  .reel-stage .slide.on{display:flex}
+  .reel-name{text-align:center;font:600 16px "Space Grotesk";color:var(--muted);min-height:22px;padding:0 16px}
+  #reelPrev,#reelNext{font-size:22px;padding:8px 20px}
   #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(20px);background:var(--ink);color:#fff;padding:11px 18px;border-radius:12px;font-size:14px;font-weight:500;opacity:0;pointer-events:none;transition:.2s;z-index:40;max-width:90vw;text-align:center}
   #toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
   @keyframes spin{to{transform:rotate(360deg)}}
@@ -146,6 +154,7 @@
     </button>
     <button type="button" class="btn" id="picBtn">Choose photos</button>
     <button class="btn" id="typeBtn" type="button">Type a number</button>
+    <button class="btn reel-btn" id="reelBtn" type="button"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10.5-6.5z"/></svg>Reel mode</button>
   </div>
   <label class="toggle">
     <input type="checkbox" id="rowMode">
@@ -170,6 +179,20 @@
     <button id="scanDone" class="chip strong" type="button">Done</button>
   </div>
   <div id="scanMsg" class="scan-msg" dir="auto">Point at a barcode</div>
+</div>
+
+<div id="reel" hidden>
+  <div class="show-top">
+    <span class="fmt" id="reelCount"></span>
+    <button class="link" id="reelDone" type="button">Done</button>
+  </div>
+  <div id="reelStage" class="reel-stage"></div>
+  <div id="reelName" class="reel-name" dir="auto"></div>
+  <div class="show-actions">
+    <button class="btn ghost" id="reelPrev" type="button" aria-label="Previous">‹</button>
+    <button class="btn ghost" id="reelPause" type="button">Pause</button>
+    <button class="btn ghost" id="reelNext" type="button" aria-label="Next">›</button>
+  </div>
 </div>
 
 <div id="show" hidden>
@@ -391,7 +414,7 @@
   $('#backdrop').addEventListener('click', e => { if (e.target.id === 'backdrop' && !$('#sheet .working')) closeSheet(); });
   document.addEventListener('keydown', e => {
     if (e.key !== 'Escape') return;
-    if (!$('#backdrop').hidden) closeSheet(); else if (!$('#show').hidden) closeShow();
+    if (!$('#backdrop').hidden) closeSheet(); else if (!$('#reel').hidden) closeReel(); else if (!$('#show').hidden) closeShow();
   });
 
   /* ---------- scanning ---------- */
@@ -596,6 +619,60 @@
       }});
   }
   $('#typeBtn').addEventListener('click', typeSheet);
+
+  /* ---------- reel mode ---------- */
+  const REEL_MS = 500;
+  let reelT = null, reelIdx = -1, reelPaused = false, reelSlides = [], wakeLock = null;
+  function keepAwake(){
+    try { if ('wakeLock' in navigator) navigator.wakeLock.request('screen').then(w => wakeLock = w).catch(() => {}); } catch(e){}
+  }
+  function openReel(){
+    if (!items.length) { toast('Nothing saved yet'); return; }
+    const stage = $('#reelStage'); stage.textContent = '';
+    reelSlides = items.map(it => {
+      const d = document.createElement('div');
+      d.className = 'slide code-big ' + kind(it);
+      d.append(codeNode(it, true));
+      stage.append(d);
+      return {el: d, it: it};
+    });
+    reelIdx = -1; reelPaused = false;
+    $('#reelPause').textContent = 'Pause';
+    $('#reel').hidden = false; document.body.classList.add('lock');
+    keepAwake();
+    reelGo(1);
+  }
+  function reelGo(step){
+    clearTimeout(reelT);
+    if (!reelSlides.length) return;
+    if (reelIdx >= 0) reelSlides[reelIdx].el.classList.remove('on');
+    reelIdx = (reelIdx + step + reelSlides.length) % reelSlides.length;
+    const s = reelSlides[reelIdx];
+    s.el.classList.add('on');
+    $('#reelCount').textContent = (reelIdx + 1) + ' / ' + reelSlides.length;
+    $('#reelName').textContent = s.it.name || '';
+    if (!reelPaused && reelSlides.length > 1) reelT = setTimeout(() => reelGo(1), REEL_MS);
+  }
+  function setReelPaused(p){
+    reelPaused = p;
+    $('#reelPause').textContent = p ? 'Play' : 'Pause';
+    clearTimeout(reelT);
+    if (!p && reelSlides.length > 1) reelT = setTimeout(() => reelGo(1), REEL_MS);
+  }
+  function closeReel(){
+    clearTimeout(reelT); reelSlides = []; $('#reelStage').textContent = '';
+    $('#reel').hidden = true;
+    if ($('#show').hidden && $('#backdrop').hidden && $('#scan').hidden) document.body.classList.remove('lock');
+    try { if (wakeLock) wakeLock.release(); } catch(e){}
+    wakeLock = null;
+  }
+  $('#reelBtn').addEventListener('click', openReel);
+  $('#reelDone').addEventListener('click', closeReel);
+  $('#reelPause').addEventListener('click', () => setReelPaused(!reelPaused));
+  $('#reelStage').addEventListener('click', () => setReelPaused(!reelPaused));
+  $('#reelPrev').addEventListener('click', () => { setReelPaused(true); reelGo(-1); });
+  $('#reelNext').addEventListener('click', () => { setReelPaused(true); reelGo(1); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && !$('#reel').hidden) keepAwake(); });
   function openCamera(){ try { $('#camIn').click(); } catch(e){ toast("Couldn't open the camera"); } }
   $('#camBtn').addEventListener('click', () => { unlockAudio(); startScanner(); });
 

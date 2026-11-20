@@ -213,6 +213,11 @@
   .pos-rows{display:flex;flex-direction:column;gap:8px;margin:6px 0 12px;max-height:52vh;overflow:auto}
   .pos-row{display:grid;grid-template-columns:28px 1fr auto;gap:6px 8px;align-items:center;background:#151412;border:1px solid var(--line);border-radius:12px;padding:8px}
   .pos-row.doubt{border-color:#7a5a12}
+  .film{position:fixed;inset:0;z-index:60;background:#000;display:flex;flex-direction:column}
+  .film video{flex:1;min-height:0;width:100%;object-fit:contain}
+  .film-top{position:absolute;top:calc(env(safe-area-inset-top) + 12px);left:0;right:0;text-align:center;color:#fff;font-weight:700;text-shadow:0 1px 4px #000}
+  .film-bar{display:flex;gap:8px;align-items:center;padding:12px 12px calc(env(safe-area-inset-bottom) + 12px);background:#0e0d0b}
+  .film-n{flex:1;color:var(--ink);font-weight:700}
   .pos-row .n{font:800 15px Inter;text-align:center}
   .pos-row input,.pos-row select{width:100%;padding:8px 9px;border:1px solid var(--line);border-radius:9px;background:#0e0d0b;color:var(--ink);font-size:15px}
   .pos-row .code{grid-column:2/3;font-family:"JetBrains Mono",monospace;letter-spacing:.04em}
@@ -284,7 +289,7 @@
     </button>
     <button type="button" class="btn" id="picBtn">Choose photos</button>
     <button class="btn" id="typeBtn" type="button">Type a number</button>
-    <button class="btn pos-btn" id="posBtn" type="button">🧾 Photos of a cashier screen</button>
+    <button class="btn pos-btn" id="posBtn" type="button">🧾 Cashier screen (photo or video)</button>
     <button class="btn reel-btn" id="reelBtn" type="button"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10.5-6.5z"/></svg>Reel mode</button>
   </div>
   <label class="toggle">
@@ -296,6 +301,7 @@
   <input class="vh" id="picIn" type="file" accept="image/*" multiple>
   <input class="vh" id="posCam" type="file" accept="image/*" capture="environment">
   <input class="vh" id="posPick" type="file" accept="image/*" multiple>
+  <input class="vh" id="posVid" type="file" accept="video/*">
 
   <div id="empty"><b>Nothing saved yet</b>Scan a loyalty card, ticket or coupon and it'll live here, ready to show.</div>
   <div id="foldersWrap" hidden><p class="section-title">Scans</p><div id="folders" class="stack"></div><p class="keep-note">Scans are deleted automatically after 7 days.</p></div>
@@ -1062,8 +1068,23 @@
     if (code.length === 8 && gtinOk(code)) return 'EAN_8';
     return 'CODE_128';
   }
+  // drop the reader's noise from a photographed screen: keep real-looking words, sizes and units
+  function cleanScreenName(t){
+    const toks = String(t || '').split(/\s+/).filter(Boolean);
+    const heb = toks.filter(x => /^[\u05d0-\u05ea]["״׳'\u05d0-\u05ea\/]{1,}$/.test(x)).length;
+    const keep = toks.filter((x, i) => {
+      if (/^[\u05d0-\u05ea]["״׳'\u05d0-\u05ea\/]{1,}$/.test(x)) return true;            // a Hebrew word
+      if (/^\d+([.,]\d+)?$/.test(x)) return /^(מ"?ל|מל|גרם|ג|ק"?ג|ליטר|ל|יח|מ"?ג|ml|g|kg|l)/i.test(toks[i + 1] || '') || /^(מ"?ל|גרם|ק"?ג|ליטר)/.test(toks[i - 1] || '');
+      if (/^\d+(מ"?ל|גרם|ק"?ג|ml|g|kg)$/i.test(x)) return true;
+      if (/^[A-Z][A-Za-z]{2,}$|^[A-Z]{3,}$/.test(x)) return true;                                    // a brand / English word
+      if (/^[a-z]{4,}$/.test(x)) return heb < 2;
+      return false;
+    });
+    return keep.join(' ').trim();
+  }
   // words: [{text, conf, x0, y0, x1, y1}] in one picture's coordinates
-  function parseScreen(words){
+  function parseScreen(words, opts){
+    const picW = (opts && opts.w) || 0;
     const ws = words.filter(w => w && w.text && String(w.text).trim()).map(w => ({...w, text: String(w.text).trim(), cy: (w.y0 + w.y1) / 2, h: Math.max(1, w.y1 - w.y0)}));
     if (!ws.length) return [];
     const hs = ws.map(w => w.h).sort((a, b) => a - b), medH = hs[Math.floor(hs.length / 2)];
@@ -1079,30 +1100,53 @@
       l.text = l.w.map(w => w.text).join(' ');
       l.x0 = Math.min(...l.w.map(w => w.x0)); l.x1 = Math.max(...l.w.map(w => w.x1));
       // the long number on the line (digits split by spaces are joined back)
-      let best = null, run = [], runX = 0;
+      let best = null, run = [], runX = 0, runX1 = 0;
       const flush = () => {
         const d = run.join('');
-        if (d.length >= 7 && d.length <= 14 && (!best || d.length > best.d.length)) best = {d: d, x: runX};
+        if (d.length >= 7 && d.length <= 14 && (!best || d.length > best.d.length)) best = {d: d, x: runX, x1: runX1};
         run = [];
       };
       for (const w of l.w) {
         const t = w.text.replace(/[^\d]/g, '');
-        if (t && /^[\d\s\-–.]+$/.test(w.text)) { if (!run.length) runX = w.x0; run.push(t); } else { flush(); }
+        // a price (12.90) or quantity (1.0) is not part of a code; stray marks at the ends (729…1!) are ignored
+        const core = w.text.replace(/^[!|:;'"`‘’,.\[\](){}]+|[!|:;'"`‘’,.\[\](){}]+$/g, '');
+        if (t && /^[\d\s\-–]+$/.test(core) && (core === w.text || t.length >= 6)) { if (!run.length) runX = w.x0; runX1 = w.x1; run.push(t); } else { flush(); }
       }
       flush();
       l.code = best ? best.d : '';
       l.codeX = best ? best.x : 0;
+      // the number runs into the edge of the photo: probably cut off
+      l.cut = !!(best && picW && best.x1 > picW * 0.95);
       l.letters = (l.text.replace(/[\d\s.,₪$€%:\-–|/\\()[\]"'״׳*+=~_]/g, '')).length;
+      // a number inside a line of words that isn't a real barcode is part of the text (a size, a phone…), not a code
+      if (l.code && l.letters >= 4 && l.code.length < 12 && !gtinOk(l.code) && !/^729/.test(l.code)) l.code = '';
+      // a stray mark read as a digit in front of an Israeli code (6729…)
+      if (/^\d729\d{5,10}$/.test(l.code) && !gtinOk(l.code)) l.code = l.code.slice(1);
     }
     // candidate product lines
     let cands = lines.filter(l => l.code && !POS_SKIP.test(l.text) && !/^\d{1,2}[\/.]\d{1,2}[\/.]\d{2,4}/.test(l.text) && !/^0(5\d|[23489])\d{7}$/.test(l.code));
-    cands.forEach(l => { const f = digitsFix(l.code.length > 13 ? l.code.slice(-13) : l.code); l.fix = f; });
+    cands.forEach(l => {
+      // an Israeli code (729…) that is too short or fails the check was probably cut off: keep it, to complete later
+      l.partial = /^729\d{5,9}$/.test(l.code) && (l.code.length < 13 || !gtinOk(l.code)) && (l.cut || l.code.length < 13);
+      const f = l.partial && l.code.length < 12 ? null : digitsFix(l.code.length > 13 ? l.code.slice(-13) : l.code);
+      l.fix = f;
+      if (l.partial && l.code.length === 12 && f && f.sure) l.partial = false;   // a real 12-digit code
+    });
+    // a coupon or message on the screen, with no real barcodes: nothing to take
+    const couponScreen = lines.some(l => POS_NOT_PRODUCT.test(l.text));
     // shops' own short codes count only when they line up with the real barcodes (same column)
     const sureXs = cands.filter(l => l.fix).map(l => l.codeX);
     const colTol = medH * 3;
     // everything else counts only when it lines up with the real barcodes (same column); it is kept
     // but marked, so it can be checked in the review
-    cands = cands.filter(l => l.fix || (sureXs.length ? sureXs.some(x => Math.abs(x - l.codeX) < colTol) : cands.length >= 2 && l.code.length <= 10));
+    cands = cands.filter(l => l.fix || l.partial || (sureXs.length ? sureXs.some(x => Math.abs(x - l.codeX) < colTol) : !couponScreen && cands.length >= 2 && l.code.length <= 10));
+    // a doubtful number a digit or two away from a sure one on the same screen is that same product again
+    const sureCodes = cands.filter(l => l.fix && l.fix.sure).map(l => l.fix.code);
+    for (const l of cands) {
+      if (l.fix && l.fix.sure) continue;
+      const twin = sureCodes.find(c => c.length === l.code.length && [...c].filter((ch, k) => ch !== l.code[k]).length <= 2);
+      if (twin) { l.fix = {code: twin, sure: true}; l.partial = false; }
+    }
     const out = [];
     for (const l of cands) {
       const i = lines.indexOf(l);
@@ -1117,12 +1161,13 @@
         name = (below || above || {text: ''}).text;
       }
       name = name.replace(/[₪$€]\s?\d+[.,]\d{2}|\d+[.,]\d{2}\s?[₪$€]?/g, ' ').replace(/\s{2,}/g, ' ').replace(/^[\s|:\-–]+|[\s|:\-–]+$/g, '').trim();
-      // quantity (x2, 2 יח', כמות 2)
-      const qm = /(?:^|\s)(?:x|×)\s?(\d{1,2})\b|\b(\d{1,2})\s?(?:x|×|יח['׳]?)(?:\s|$)|כמות[:\s]*(\d{1,2})/i.exec(l.text + ' ' + name);
-      const qty = qm ? Math.max(1, Math.min(20, +(qm[1] || qm[2] || qm[3]))) : 1;
-      name = name.replace(/(?:^|\s)(?:x|×)\s?\d{1,2}\b|\b\d{1,2}\s?(?:x|×|יח['׳]?)(?=\s|$)|כמות[:\s]*\d{1,2}/gi, ' ').replace(/\s{2,}/g, ' ').trim();
+      name = cleanScreenName(name);
+      // quantity (x2, 2 יח', כמות 2, or a quantity column showing 2.0)
+      const qm = /(?:^|\s)(?:x|×)\s?(\d{1,2})\b|\b(\d{1,2})\s?(?:x|×|יח['׳]?)(?:\s|$)|כמות[:\s]*(\d{1,2})|(?:^|\s)(\d{1,2})[.,]0(?=\s|$)/i.exec(l.text + ' ' + name);
+      const qty = qm ? Math.max(1, Math.min(20, +(qm[1] || qm[2] || qm[3] || qm[4]))) : 1;
+      name = name.replace(/(?:^|\s)(?:x|×)\s?\d{1,2}\b|\b\d{1,2}\s?(?:x|×|יח['׳]?)(?=\s|$)|כמות[:\s]*\d{1,2}|(?:^|\s)-?\d{1,4}[.,]\d{1,2}(?=\s|$)/gi, ' ').replace(/\s{2,}/g, ' ').trim();
       const code = l.fix ? l.fix.code : l.code;
-      out.push({code: code, format: formatFor(code), name: name.slice(0, 60), qty: qty, sure: !!(l.fix && l.fix.sure), fixed: !!(l.fix && l.fix.fixed), y: l.cy});
+      out.push({code: code, format: formatFor(code), name: name.slice(0, 60), qty: qty, sure: !!(l.fix && l.fix.sure), fixed: !!(l.fix && l.fix.fixed), partial: !!l.partial && !(l.fix && l.fix.sure), cut: !!l.cut, y: l.cy});
     }
     return out;
   }
@@ -1159,40 +1204,76 @@
 
   // read one photo of a till screen: the words (Hebrew + English) and a digits-only pass, at the angle that works
   async function readScreenPhoto(file){
-    let img; try { img = await loadImage(file); } catch(e){ return []; }
+    let img;
+    if (file instanceof HTMLCanvasElement) img = file;
+    else { try { img = await loadImage(file); } catch(e){ return []; } }
     const base = toCanvas(img, 2400);
     const big = base.width < 1700 ? upscale(base, 2200) : base;
     await loadLabelOCR(); await loadOCR();
     const toWords = data => wordsOf(data || {}).filter(w => w && w.bbox).map(w => ({text: w.text, conf: w.confidence, x0: w.bbox.x0, y0: w.bbox.y0, x1: w.bbox.x1, y1: w.bbox.y1}));
     let best = [];
-    for (const deg of [0, 180, -5, 5, 90, -90]) {
+    // straight first, then slightly tilted (a photo taken from the side), then sideways / upside down
+    for (const deg of [0, 5, -5, 9, -9, 180, 90, -90]) {
       const pic = enhance(deg ? rotated(big, deg) : big, 0.4);
       let words = [], digits = [];
       if (lblWorker) { try { const r = await withLabelWorker(w => w.recognize(pic, {}, {blocks: true, text: true})); words = toWords(r.data); } catch(e){} }
       if (ocrWorker) { try { const r = await ocrWorker.recognize(pic, {}, {blocks: true, text: true}); digits = toWords(r.data); } catch(e){} }
-      let rows = parseScreen(words);
-      // the digits-only reading is better at numbers: use it to correct or add codes
-      const drows = parseScreen(digits.map(w => ({...w, text: w.text + ''})));
-      for (const d of drows.filter(d => d.sure)) {
+      const opts = {w: pic.width};
+      // the digits-only reading is better at numbers: its long numbers replace whatever the word
+      // reading made of the same spot, so each code still gets the name written next to it
+      const longD = digits.filter(d => String(d.text).replace(/\D/g, '').length >= 7);
+      const hit = (a, b) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+      const mixed = words.filter(w => !longD.some(d => hit(w, d) && /\d/.test(w.text))).concat(longD.map(d => ({...d, text: String(d.text)})));
+      let rows = parseScreen(mixed, opts);
+      const drows = parseScreen(digits.map(w => ({...w, text: w.text + ''})), opts);
+      for (const d of drows.filter(d => d.sure || d.partial)) {
         const near = rows.find(r => Math.abs(r.y - d.y) < 25);
-        if (near && !near.sure) { near.code = d.code; near.format = d.format; near.sure = true; }
+        if (near && !near.sure && (d.sure || d.code.length > near.code.length)) { near.code = d.code; near.format = d.format; near.sure = d.sure; near.partial = d.partial; near.cut = d.cut; }
         else if (!near && !rows.some(r => r.code === d.code)) rows.push({...d, name: ''});
       }
       rows.sort((a, b) => a.y - b.y);
-      if (rows.filter(r => r.sure).length > best.filter(r => r.sure).length || (!best.length && rows.length)) best = rows;
-      if (best.filter(r => r.sure).length >= 2) break;
+      const score = rs => rs.filter(r => r.sure).length * 2 + rs.filter(r => r.partial).length;
+      if (score(rows) > score(best) || (!best.length && rows.length)) best = rows;
+      if (best.filter(r => r.sure).length >= 2 && deg === 0 || best.filter(r => r.sure).length >= 3) break;
     }
     return best;
   }
+  // a number cut off at the photo's edge: the missing digits come from the product list —
+  // the Israeli codes that start the same way, picked by the name on the screen
+  function checkDigit(d12){ for (let c = 0; c < 10; c++) if (gtinOk(d12 + c)) return d12 + c; return ''; }
+  async function completeRows(rows){
+    for (const r of rows) {
+      if (r.sure || !/^\d{8,12}$/.test(r.code || '') || !(r.partial || r.cut)) continue;
+      let list = null;
+      try { list = await ilGet('n/' + r.code.slice(0, 8) + '.json'); } catch(e){}
+      const matches = (list || []).filter(x => x[0].length === 13 && x[0].startsWith(r.code));
+      let pick = null;
+      if (r.code.length === 12) {
+        const c = checkDigit(r.code);   // only one last digit makes a valid barcode
+        pick = matches.find(x => x[0] === c) || (c ? [c, '', '', ''] : null);
+      } else if (matches.length === 1) pick = matches[0];
+      else if (matches.length > 1 && r.name) {
+        const mine = new Set(normTokens(r.name));
+        const sc = matches.map(x => ({x: x, n: normTokens(x[1]).filter(t => mine.has(t)).length})).sort((a, b) => b.n - a.n);
+        if (sc[0].n >= 1 && sc[0].n > sc[1].n) pick = sc[0].x;
+      }
+      if (!pick) continue;
+      r.code = pick[0]; r.format = formatFor(r.code); r.sure = false; r.completed = true;
+      if (!r.name && pick[1]) r.name = pick[1].slice(0, 60);
+    }
+    return rows;
+  }
   let posFiles = [];
   function posSheet(){
-    openSheet('<h2>Photos of a cashier screen</h2>' +
-      '<p class="pos-note">Photograph the list of products on the till screen, top to bottom. If it doesn’t fit in one photo, take more, each one overlapping the last by a row or two — repeats are removed automatically.</p>' +
+    openSheet('<h2>Cashier screen</h2>' +
+      '<p class="pos-note">Photograph the list of products on the till screen, top to bottom. If it doesn’t fit in one photo, take more, each one overlapping the last by a row or two — or film it, scrolling slowly. Repeats are removed automatically. Keep the whole width of the screen in view, straight on, without glare.</p>' +
       '<div class="pos-thumbs"></div>' +
       '<div class="row"><button class="btn" data-act="cam">📷 Take a photo</button><button class="btn" data-act="pick">🖼 Choose photos</button></div>' +
+      '<div class="row" style="margin-top:8px"><button class="btn" data-act="film">🎥 Film the screen</button><button class="btn" data-act="vid">🎞 Choose a video</button></div>' +
       '<div class="col" style="margin-top:10px"><button class="btn primary" data-act="read">Read the list</button><button class="btn ghost" data-act="cancel">Cancel</button></div>',
       {
         cam: () => $('#posCam').click(), pick: () => $('#posPick').click(),
+        film: () => filmScreen(), vid: () => $('#posVid').click(),
         read: () => { if (!posFiles.length) { toast('Add a photo first'); return; } readScreens(posFiles.slice()); },
         cancel: () => { posFiles = []; closeSheet(); }
       },
@@ -1211,19 +1292,86 @@
     });
   }
   $('#posBtn').addEventListener('click', () => { posFiles = []; posSheet(); });
-  async function readScreens(files){
-    let list = [], notes = [];
+  $('#posVid').addEventListener('change', e => {
+    const f = e.target.files && e.target.files[0]; e.target.value = '';
+    if (f) framesFromVideo(f);
+  });
+  async function readScreens(files, word){
+    word = word || 'photo';
+    let list = [], notes = [], misses = 0, cut = false;
     for (let i = 0; i < files.length; i++) {
       openSheet('<div class="working"><div class="spinner"></div><p></p></div>', null,
-        el => el.querySelector('p').textContent = 'Reading photo ' + (i + 1) + ' of ' + files.length + '…' + (i === 0 ? ' (the first time takes longer)' : ''));
+        el => el.querySelector('p').textContent = 'Reading ' + word + ' ' + (i + 1) + ' of ' + files.length + '…' + (i === 0 ? ' (the first time takes longer)' : ''));
       await tick();
       const rows = await readScreenPhoto(files[i]);
-      if (!rows.length) { notes.push('Photo ' + (i + 1) + ': no products found'); continue; }
+      if (rows.some(r => r.cut)) cut = true;
+      if (!rows.length) { misses++; if (word === 'photo') notes.push('Photo ' + (i + 1) + ': no products found'); continue; }
       const st = stitchLists(list, rows);
-      if (i > 0 && !st.overlap && list.length) notes.push('Photo ' + (i + 1) + ' didn’t overlap the others — check for repeats');
+      if (i > 0 && !st.overlap && list.length && word === 'photo') notes.push('Photo ' + (i + 1) + ' didn’t overlap the others — check for repeats');
       list = st.list;
     }
+    if (word !== 'photo') notes.unshift(files.length + (files.length === 1 ? ' picture' : ' pictures') + ' taken from the video');
+    if (word !== 'photo' && misses && misses === files.length) notes.push('No products could be read from the video');
+    await completeRows(list);
+    if (cut) notes.push('Some numbers ran off the edge of the ' + word + ' — keep the whole width of the screen in view');
     reviewScreen(list, notes);
+  }
+
+  /* ----- filming the till screen ----- a still is taken about every 0.7 s (a very low frame rate),
+     and only the ones that show something new are kept, so a long film stays a few small pictures.
+     Nothing is saved: the pictures are dropped once the list is read. */
+  const FILM_MS = 700, FILM_MAX = 30;
+  function frameKeeper(){
+    const kept = []; let last = null;
+    return {
+      kept: kept,
+      offer(canvas){
+        if (kept.length >= FILM_MAX) return false;
+        const sig = sceneSig(canvas);
+        if (last && sigDiff(sig, last) < 0.16) return false;   // same as the last kept picture
+        last = sig; kept.push(canvas); return true;
+      }
+    };
+  }
+  let film = null;
+  async function filmScreen(){
+    closeSheet();
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({audio: false, video: {facingMode: {ideal: 'environment'}, width: {ideal: 1920}, height: {ideal: 1080}, frameRate: {ideal: 5, max: 10}}});
+    } catch(e){ toast('Camera not available'); posSheet(); return; }
+    const box = document.createElement('div'); box.className = 'film';
+    box.innerHTML = '<video playsinline muted autoplay></video><div class="film-top">Film the list slowly, top to bottom</div>' +
+      '<div class="film-bar"><span class="film-n">0 pictures</span><button class="btn primary" type="button">Stop and read</button><button class="btn ghost" type="button">Cancel</button></div>';
+    document.body.append(box); document.body.classList.add('lock');
+    const v = box.querySelector('video'); v.srcObject = stream;
+    const keep = frameKeeper();
+    const stop = () => { clearInterval(film && film.t); stream.getTracks().forEach(t => t.stop()); box.remove(); document.body.classList.remove('lock'); film = null; };
+    film = {t: setInterval(() => {
+      if (v.readyState < 2) return;
+      if (keep.offer(toCanvas(v, 2400))) box.querySelector('.film-n').textContent = keep.kept.length + (keep.kept.length === 1 ? ' picture' : ' pictures');
+    }, FILM_MS)};
+    const [go, cancel] = box.querySelectorAll('.film-bar .btn');
+    go.onclick = () => { const frames = keep.kept.slice(); stop(); if (!frames.length) { toast('Nothing filmed yet'); posSheet(); return; } readScreens(frames, 'picture'); };
+    cancel.onclick = () => { stop(); posSheet(); };
+  }
+  // a video from the phone's gallery: one still about every 0.7 s, the same way
+  async function framesFromVideo(file){
+    openSheet('<div class="working"><div class="spinner"></div><p>Looking through the video…</p></div>');
+    const url = URL.createObjectURL(file);
+    const v = document.createElement('video'); v.muted = true; v.playsInline = true; v.preload = 'auto'; v.src = url;
+    const keep = frameKeeper();
+    try {
+      await new Promise((res, rej) => { v.onloadeddata = res; v.onerror = rej; setTimeout(rej, 15000); });
+      const dur = isFinite(v.duration) ? v.duration : 0;
+      for (let t = 0.2; t < dur && keep.kept.length < FILM_MAX; t += FILM_MS / 1000) {
+        await new Promise(res => { v.onseeked = res; v.currentTime = t; setTimeout(res, 3000); });
+        keep.offer(toCanvas(v, 2400));
+      }
+    } catch(e){}
+    v.removeAttribute('src'); v.load(); URL.revokeObjectURL(url);   // the video itself is let go
+    if (!keep.kept.length) { toast('Couldn’t read that video'); posSheet(); return; }
+    readScreens(keep.kept, 'picture');
   }
   function reviewScreen(list, notes){
     const rows = list.map(r => ({...r}));
@@ -1231,10 +1379,10 @@
       const box = el.querySelector('.pos-rows'); box.textContent = '';
       rows.forEach((r, i) => {
         const d = document.createElement('div'); d.className = 'pos-row' + (r.sure ? '' : ' doubt');
-        d.innerHTML = '<span class="n"></span><input class="nm" dir="auto" placeholder="Name"><div class="side"><select></select><button type="button" class="x" aria-label="Remove">✕</button></div><input class="code" inputmode="numeric" placeholder="Barcode number">' + (r.sure ? '' : '<span class="warn-t">Check this number</span>');
+        d.innerHTML = '<span class="n"></span><input class="nm" dir="auto" placeholder="Name"><div class="side"><select></select><button type="button" class="x" aria-label="Remove">✕</button></div><input class="code" inputmode="numeric" placeholder="Barcode number">' + (r.sure ? '' : '<span class="warn-t">' + (r.completed ? 'Cut off on the screen — completed from the product list, check it' : 'Check this number') + '</span>');
         d.querySelector('.n').textContent = i + 1;
-        const nm = d.querySelector('.nm'); nm.value = r.name || ''; nm.oninput = () => r.name = nm.value;
-        const cd = d.querySelector('.code'); cd.value = r.code; cd.oninput = () => { r.code = cd.value.replace(/\D/g, ''); r.format = formatFor(r.code); r.sure = gtinOk(r.code) && r.code.length >= 8; d.classList.toggle('doubt', !r.sure); };
+        const nm = d.querySelector('.nm'); nm.value = r.name || ''; nm.oninput = () => { r.name = nm.value; r.edited = true; };
+        const cd = d.querySelector('.code'); cd.value = r.code; cd.oninput = () => { r.completed = false; r.code = cd.value.replace(/\D/g, ''); r.format = formatFor(r.code); r.sure = gtinOk(r.code) && r.code.length >= 8; d.classList.toggle('doubt', !r.sure); };
         const q = d.querySelector('select');
         for (let k = 1; k <= 10; k++) { const o = document.createElement('option'); o.value = k; o.textContent = '×' + k; if (k === r.qty) o.selected = true; q.append(o); }
         q.onchange = () => r.qty = +q.value;
@@ -1256,7 +1404,7 @@
           for (const r of good) for (let k = 0; k < r.qty; k++) {
             const it = {value: r.code, format: r.format || formatFor(r.code), session: sid, created: sid + n * 10};
             it.name = (r.name || defaultName(it)) + (r.qty > 1 ? ' (' + (k + 1) + ')' : '');
-            it.autoName = !r.name;
+            it.autoName = !r.name || !r.edited;
             saveItem(it); n++;
             prefetch(it.value);
             analyzeLater({id: it.id, prio: 0});
@@ -2868,7 +3016,7 @@
   }
   let pass = 0, lastBox = null, lastBoxAt = 0;
   const frameBuf = []; let lastBufAt = 0;
-  window.__bwTest = {reviewScreen: (l, n) => reviewScreen(l, n), parseScreen: w => parseScreen(w), stitchLists: (a, b) => stitchLists(a, b), locate: locate, straighten: straighten, searchByWords: (w, s, t) => searchByWords(w, s, t), studyState: () => ({segs: videoSegs.length, marks: videoMarks.length, recording: !!rec}), readClues: readClues, similarProducts: similarProducts, barcodeNeighbours: barcodeNeighbours, packageColour: packageColour, aroundBarcode: aroundBarcode};
+  window.__bwTest = {reviewScreen: (l, n) => reviewScreen(l, n), parseScreen: (w, o) => parseScreen(w, o), completeRows: r => completeRows(r), stitchLists: (a, b) => stitchLists(a, b), locate: locate, straighten: straighten, searchByWords: (w, s, t) => searchByWords(w, s, t), studyState: () => ({segs: videoSegs.length, marks: videoMarks.length, recording: !!rec}), readClues: readClues, similarProducts: similarProducts, barcodeNeighbours: barcodeNeighbours, packageColour: packageColour, aroundBarcode: aroundBarcode};
   async function detectFrame(v){
     pass++;
     let box = null;

@@ -142,6 +142,7 @@
   .reel-stage{flex:1;display:flex;align-items:center;justify-content:center;padding:10px;min-height:0}
   .reel-stage .slide{display:none}
   .reel-stage .slide.on{display:flex}
+  .reel-stage .slide.blank{width:100%;height:100%;background:#fff}
   .reel-name{text-align:center;font:600 16px "Space Grotesk";color:var(--muted);min-height:22px;padding:0 16px}
   #reelPrev,#reelNext{font-size:22px;padding:8px 20px}
   #toast{position:fixed;left:50%;bottom:26px;transform:translateX(-50%) translateY(20px);background:var(--ink);color:#fff;padding:11px 18px;border-radius:12px;font-size:14px;font-weight:500;opacity:0;pointer-events:none;transition:.2s;z-index:40;max-width:90vw;text-align:center}
@@ -714,8 +715,9 @@
   $('#typeBtn').addEventListener('click', typeSheet);
 
   /* ---------- reel mode ---------- */
-  const REEL_MS = 500;
-  let reelT = null, reelIdx = -1, reelPaused = false, reelDone = false, reelSlides = [], wakeLock = null;
+  const REEL_MS = 500, BLANK_MS = 500;
+  const REPEAT_SCALES = [1, 0.8, 0.92, 0.72, 0.86];   // 1st, 2nd, 3rd… showing of the same barcode
+  let reelT = null, reelIdx = -1, reelPaused = false, reelDone = false, reelSlides = [], reelTotal = 0, wakeLock = null;
   function keepAwake(){
     try { if ('wakeLock' in navigator) navigator.wakeLock.request('screen').then(w => wakeLock = w).catch(() => {}); } catch(e){}
   }
@@ -723,13 +725,28 @@
     list = Array.isArray(list) ? list : items;
     if (!list.length) { toast('Nothing saved yet'); return; }
     const stage = $('#reelStage'); stage.textContent = '';
-    reelSlides = list.map(it => {
+    const seen = new Map();
+    reelSlides = [];
+    list.forEach((it, i) => {
+      const key = it.format + '|' + it.value;
+      const prev = list[i - 1];
+      if (prev && it.value && prev.value === it.value && prev.format === it.format) {
+        const blank = document.createElement('div');
+        blank.className = 'slide blank';
+        stage.append(blank);
+        reelSlides.push({el: blank, blank: true, n: i, ms: BLANK_MS});
+      }
+      const k = seen.get(key) || 0; seen.set(key, k + 1);
       const d = document.createElement('div');
       d.className = 'slide code-big ' + kind(it);
-      d.append(codeNode(it, true));
+      const node = codeNode(it, true);
+      const sc = REPEAT_SCALES[k % REPEAT_SCALES.length];
+      if (sc !== 1) { node.style.transform = 'scale(' + sc + ')'; node.style.transformOrigin = 'center'; }
+      d.append(node);
       stage.append(d);
-      return {el: d, it: it};
+      reelSlides.push({el: d, it: it, n: i + 1, ms: REEL_MS});
     });
+    reelTotal = list.length;
     reelIdx = -1; reelPaused = false; reelDone = false;
     $('#reelPause').textContent = 'Pause';
     $('#reel').hidden = false; document.body.classList.add('lock');
@@ -741,17 +758,19 @@
     if (!reelSlides.length) return;
     if (reelIdx >= 0) reelSlides[reelIdx].el.classList.remove('on');
     reelIdx = (reelIdx + step + reelSlides.length) % reelSlides.length;
+    // when stepping by hand, skip the blank breaks
+    if (reelPaused) while (reelSlides[reelIdx].blank) reelIdx = (reelIdx + (step < 0 ? -1 : 1) + reelSlides.length) % reelSlides.length;
     const s = reelSlides[reelIdx];
     s.el.classList.add('on');
-    $('#reelCount').textContent = (reelIdx + 1) + ' / ' + reelSlides.length;
-    $('#reelName').textContent = s.it.name || '';
+    $('#reelCount').textContent = s.n + ' / ' + reelTotal;
+    $('#reelName').textContent = s.blank ? '' : (s.it.name || '');
     scheduleNext();
   }
   function scheduleNext(){
     clearTimeout(reelT);
     if (reelPaused) return;
     if (reelIdx >= reelSlides.length - 1) { reelFinished(); return; }
-    reelT = setTimeout(() => reelGo(1), REEL_MS);
+    reelT = setTimeout(() => reelGo(1), reelSlides[reelIdx].ms || REEL_MS);
   }
   function reelFinished(){
     reelDone = true; reelPaused = true;
@@ -788,7 +807,7 @@
 
   /* ---------- live scanner ---------- */
   let stream = null, scanning = false, loopT = null, busy = false, detector = null, zxReader = null, zxHints = null;
-  let sessionId = null, lastVal = '', lastSeen = 0, cand = '', candN = 0, sessionCount = 0, resumeLater = false, torchOn = false, audioCtx = null;
+  let sessionId = null, sessionVals = new Map(), lastVal = '', lastSeen = 0, cand = '', candN = 0, sessionCount = 0, resumeLater = false, torchOn = false, audioCtx = null;
   const setMsg = t => { $('#scanMsg').textContent = t; };
 
   function soundReady(){ return !!audioCtx && audioCtx.state === 'running'; }
@@ -833,7 +852,7 @@
 
   async function startScanner(){
     if (scanning) return;
-    if (!sessionId) sessionId = Date.now();
+    if (!sessionId) { sessionId = Date.now(); sessionVals = new Map(); lastVal = ''; }
     $('#scan').hidden = false; document.body.classList.add('lock');
     $('#scanCount').textContent = sessionCount + ' saved';
     setMsg('Starting camera…');
@@ -925,29 +944,32 @@
     const v = $('#vid');
     if (v.readyState >= 2 && !busy) {
       busy = true;
-      try { const r = await detectFrame(v); if (r) onCode(r, v); } catch(e){}
+      try { const r = await detectFrame(v); if (r) onCode(r, v); else candN = 0; } catch(e){}
       busy = false;
     }
     loopT = setTimeout(loop, 150);
   }
+  // The same barcode counts again once it has been out of view for this long
+  const REAPPEAR_MS = 500;
   function onCode(r, v){
     const now = Date.now();
+    // still the same barcode being held in view: not a new scan
+    if (r.value === lastVal && now - lastSeen < REAPPEAR_MS) { lastSeen = now; return; }
     if (!detector) {           // the fallback reader can misread, so need the same result twice
       if (r.value === cand) candN++; else { cand = r.value; candN = 1; }
       if (candN < 2) return;
     }
-    if (r.value === lastVal && now - lastSeen < 4000) { lastSeen = now; return; }
     lastVal = r.value; lastSeen = now;
-    const dup = items.find(x => x.value === r.value && x.format !== 'PHOTO');
-    if (dup) { setMsg('Already saved: ' + (dup.name || 'Untitled')); flash('dup'); beep('dup'); return; }
+    const n = (sessionVals.get(r.value) || 0) + 1;
+    sessionVals.set(r.value, n);
     let photo = null;
     try { photo = toCanvas(v, 760).toDataURL('image/jpeg', 0.72); } catch(e){}
     const it = {value: r.value, format: r.format, photo: photo, session: sessionId};
-    it.name = defaultName(it);
+    it.name = defaultName(it) + (n > 1 ? ' (' + n + ')' : '');
     saveItem(it);
     sessionCount++;
     $('#scanCount').textContent = sessionCount + ' saved';
-    setMsg('Saved ' + fmtLabel(r.format) + ' · ' + r.value);
+    setMsg((n > 1 ? 'Saved again ×' + n + ' · ' : 'Saved ' + fmtLabel(r.format) + ' · ') + r.value);
     flash('ok'); beep('ok');
     try { if (navigator.vibrate) navigator.vibrate(70); } catch(e){}
   }

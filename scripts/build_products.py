@@ -111,14 +111,16 @@ def add_medicine(m, kind, out):
             continue
         codes = barcodes_in(p) or (rec_codes if len(packs) == 1 else set())
         size = (p.get("packageDesc") or p.get("packDesc") or p.get("packageName") or "").strip()
+        if not re.search(r"\d", size):   # the registry often gives the container type ("TUBE ALUMINIUM") here
+            size = ""
         price = p.get("customerPriceWithTax") or 0
         for c in codes:
             out[c] = {"name": name if not eng or eng.lower() in name.lower() else f"{name} ({eng})",
-                      "maker": maker, "size": size or form, "price": float(price) if price else None,
+                      "maker": maker, "size": size, "price": float(price) if price else None,
                       "kind": kind, "extra": comps}
     if not packs:
         for c in rec_codes:
-            out[c] = {"name": name, "maker": maker, "size": form, "price": None, "kind": kind, "extra": comps}
+            out[c] = {"name": name, "maker": maker, "size": "", "price": None, "kind": kind, "extra": comps}
 
 
 def read_bytes(path):

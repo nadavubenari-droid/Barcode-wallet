@@ -1452,7 +1452,14 @@
     // 3. put it together
     // Israeli shop names are full descriptions ("<brand> <product> <size>"), so they lead when present
     const brand = known && known.brand ? known.brand : shop ? shop.maker : '';
-    const name = shop && shop.name ? shop.name : known && known.name ? known.name : seen && seen.guess ? seen.guess : '';
+    let shopName = shop && shop.name ? shop.name.trim() : '';
+    if (shopName && shop.size) {
+      // chains often cut names off mid-word ("…1 ק\""): drop the cut piece and add the size properly
+      const cut = shopName.replace(/\s+[\d.,]*\s*\S{0,3}["'״׳]$/, '').replace(/\s+\d+([.,]\d+)?$/, '');
+      const hasSize = /\d/.test(cut) && cut.indexOf(shop.size.split(' ')[0]) >= 0;
+      shopName = hasSize ? cut : cut + ' ' + shop.size;
+    }
+    const name = shopName || (known && known.name ? known.name : seen && seen.guess ? seen.guess : '');
     const nameFrom = shop && shop.name ? 'shops' : known && known.name ? 'db' : name ? 'camera' : '';
     const size = known && known.quantity ? known.quantity : shop && shop.size ? shop.size : seen && seen.size ? seen.size : '';
     const pr = seen && seen.price ? {text: seen.price, src: 'camera'}

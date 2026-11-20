@@ -55,7 +55,18 @@
   .vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 
   .section-title{font:600 13px/1 Inter;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);margin:0 0 10px 4px}
-  #list{display:flex;flex-direction:column;gap:10px}
+  #list,.stack{display:flex;flex-direction:column;gap:10px}
+  #home[hidden]{display:none}
+  #foldersWrap{margin-bottom:26px}
+  .folder-ic{width:52px;height:52px;flex:none;border-radius:14px;background:#ffe3d6;color:var(--accent);display:grid;place-items:center}
+  .folder-ic svg{width:26px;height:26px}
+  .count-badge{font:600 13px Inter;color:var(--muted);background:#efe8db;border-radius:99px;padding:3px 9px;white-space:nowrap}
+  #folderView{min-height:100vh;background:var(--bg)}
+  #folderView[hidden]{display:none}
+  .back{padding:0;margin:0 0 14px;font-size:16px}
+  .fv-title{font:700 26px/1.15 "Space Grotesk";margin:0 0 4px}
+  .fv-sub{color:var(--muted);margin:0 0 18px}
+  .fv-del{width:100%;margin-top:26px}
   .card{display:flex;align-items:center;gap:14px;width:100%;text-align:left;background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:12px 14px 12px 12px;-webkit-tap-highlight-color:transparent}
   .card:active{background:#f7f2e9}
   .thumb{width:88px;height:52px;flex:none;background:#fff;border:1px solid var(--line);border-radius:10px;display:flex;align-items:center;justify-content:center;overflow:hidden;padding:4px}
@@ -141,7 +152,7 @@
 </style>
 </head>
 <body>
-<div class="wrap">
+<div class="wrap" id="home">
   <header>
     <h1>Barcode<br>Wallet<span>.</span></h1>
     <div id="mode" class="pill"><i></i><span>Connecting…</span></div>
@@ -164,9 +175,22 @@
   <input class="vh" id="camIn" type="file" accept="image/*">
   <input class="vh" id="picIn" type="file" accept="image/*" multiple>
 
-  <p class="section-title">Saved</p>
   <div id="empty"><b>Nothing saved yet</b>Scan a loyalty card, ticket or coupon and it'll live here, ready to show.</div>
-  <div id="list"></div>
+  <div id="foldersWrap" hidden><p class="section-title">Scans</p><div id="folders" class="stack"></div></div>
+  <div id="looseWrap" hidden><p class="section-title">Other saved codes</p><div id="list" class="stack"></div></div>
+</div>
+
+<div id="folderView" hidden>
+  <div class="wrap">
+    <button class="link back" id="fvBack" type="button">‹ All scans</button>
+    <h2 class="fv-title" id="fvTitle"></h2>
+    <p class="fv-sub" id="fvSub"></p>
+    <div class="actions">
+      <button class="btn reel-btn" id="fvReel" type="button"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10.5-6.5z"/></svg>Reel mode</button>
+    </div>
+    <div id="fvList" class="stack"></div>
+    <button class="btn danger fv-del" id="fvDelete" type="button">Delete this folder</button>
+  </div>
 </div>
 
 <div id="scan" hidden>
@@ -244,6 +268,7 @@
   function bodyOf(it){
     const b = {name: it.name || '', value: it.value || '', format: it.format, created: it.created};
     if (it.photo) b.photo = it.photo;
+    if (it.session) b.session = it.session;
     return b;
   }
 
@@ -340,22 +365,89 @@
   }
 
   /* ---------- list ---------- */
+  let openFolder = null;   // session id of the folder being viewed
+  const FOLDER_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2.2h8.4A1.5 1.5 0 0 1 21 8.7v9.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 18.5z"/></svg>';
+  function folderName(ts){
+    try { return new Date(ts).toLocaleString(undefined, {weekday: 'short', day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit'}); }
+    catch(e){ return new Date(ts).toString().slice(0, 21); }
+  }
+  function folders(){
+    const map = new Map();
+    for (const it of items) if (it.session) {
+      const f = map.get(it.session) || {id: it.session, items: [], last: 0};
+      f.items.push(it); f.last = Math.max(f.last, it.created || 0);
+      map.set(it.session, f);
+    }
+    const list = [...map.values()];
+    list.forEach(f => f.items.sort((a, b) => (a.created || 0) - (b.created || 0)));   // scan order
+    return list.sort((a, b) => b.last - a.last);
+  }
+  const getFolder = id => folders().find(f => String(f.id) === String(id));
+  const plural = n => n + (n === 1 ? ' barcode' : ' barcodes');
+
+  function itemCard(it){
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'card';
+    b.innerHTML = '<div class="thumb"></div><div class="meta"><div class="name" dir="auto"></div><div class="val" dir="auto"></div></div><span class="chev">›</span>';
+    b.querySelector('.name').textContent = it.name || 'Untitled';
+    b.querySelector('.val').textContent = it.format === 'PHOTO' ? 'Photo' : fmtLabel(it.format) + ' · ' + it.value;
+    b.querySelector('.thumb').append(codeNode(it, false));
+    b.addEventListener('click', () => openShow(it.id));
+    return b;
+  }
   function render(){
-    const list = $('#list');
-    list.textContent = '';
-    $('#empty').hidden = items.length > 0;
-    for (const it of items) {
+    const fs = folders();
+    const fl = $('#folders'); fl.textContent = '';
+    for (const f of fs) {
       const b = document.createElement('button');
       b.type = 'button'; b.className = 'card';
-      b.innerHTML = '<div class="thumb"></div><div class="meta"><div class="name" dir="auto"></div><div class="val" dir="auto"></div></div><span class="chev">›</span>';
-      b.querySelector('.name').textContent = it.name || 'Untitled';
-      b.querySelector('.val').textContent = it.format === 'PHOTO' ? 'Photo' : fmtLabel(it.format) + ' · ' + it.value;
-      b.querySelector('.thumb').append(codeNode(it, false));
-      b.addEventListener('click', () => openShow(it.id));
-      list.append(b);
+      b.innerHTML = '<div class="folder-ic">' + FOLDER_SVG + '</div><div class="meta"><div class="name"></div></div><span class="count-badge"></span><span class="chev">›</span>';
+      b.querySelector('.name').textContent = folderName(f.last);
+      b.querySelector('.count-badge').textContent = f.items.length;
+      b.addEventListener('click', () => openFolderView(f.id));
+      fl.append(b);
     }
+    const loose = items.filter(it => !it.session);
+    const list = $('#list'); list.textContent = '';
+    loose.forEach(it => list.append(itemCard(it)));
+    $('#foldersWrap').hidden = !fs.length;
+    $('#looseWrap').hidden = !loose.length;
+    $('#empty').hidden = items.length > 0;
+    if (openFolder !== null) drawFolder();
     if (showId) drawShow();
   }
+
+  /* ---------- folder view ---------- */
+  function openFolderView(id){
+    openFolder = id;
+    $('#home').hidden = true; $('#folderView').hidden = false;
+    window.scrollTo(0, 0);
+    drawFolder();
+  }
+  function closeFolderView(){
+    openFolder = null;
+    $('#folderView').hidden = true; $('#home').hidden = false;
+  }
+  function drawFolder(){
+    const f = getFolder(openFolder);
+    if (!f) { closeFolderView(); return; }
+    $('#fvTitle').textContent = folderName(f.last);
+    $('#fvSub').textContent = plural(f.items.length) + ', in the order you scanned them';
+    const l = $('#fvList'); l.textContent = '';
+    f.items.forEach(it => l.append(itemCard(it)));
+  }
+  $('#fvBack').addEventListener('click', closeFolderView);
+  $('#fvReel').addEventListener('click', () => { const f = getFolder(openFolder); if (f) openReel(f.items); });
+  $('#fvDelete').addEventListener('click', () => {
+    const f = getFolder(openFolder); if (!f) return;
+    openSheet('<h2>Delete this folder?</h2><p class="m"></p><div class="row"><button class="btn ghost" data-act="cancel">Cancel</button><button class="btn primary" style="background:var(--danger)" data-act="del">Delete</button></div>',
+      {del: async () => {
+        closeSheet(); closeFolderView();
+        for (const it of f.items) await deleteItem(it);
+        toast('Folder deleted');
+      }},
+      el => el.querySelector('.m').textContent = 'All ' + plural(f.items.length) + ' from ' + folderName(f.last) + " will be deleted. This can't be undone.");
+  });
 
   /* ---------- show overlay ---------- */
   function openShow(id){ showId = id; showingPhoto = false; drawShow(); $('#show').hidden = false; document.body.classList.add('lock'); }
@@ -514,7 +606,7 @@
   const isDup = v => items.some(x => x.value === v && x.format !== 'PHOTO');
 
   async function batchFiles(files){
-    let saved = 0, dup = 0, failed = 0;
+    let saved = 0, dup = 0, failed = 0; const sid = Date.now();
     for (let i = 0; i < files.length; i++) {
       openSheet('<div class="working"><div class="spinner"></div><p></p></div>', null,
         el => el.querySelector('p').textContent = 'Reading ' + (i + 1) + ' of ' + files.length + '…');
@@ -522,7 +614,7 @@
       const {found, photo} = await readOne(files[i]);
       if (!found) { failed++; continue; }
       if (isDup(found.value)) { dup++; continue; }
-      const it = {value: found.value, format: found.format, photo: photo};
+      const it = {value: found.value, format: found.format, photo: photo, session: sid};
       it.name = defaultName(it);
       await saveItem(it);
       saved++;
@@ -627,10 +719,11 @@
   function keepAwake(){
     try { if ('wakeLock' in navigator) navigator.wakeLock.request('screen').then(w => wakeLock = w).catch(() => {}); } catch(e){}
   }
-  function openReel(){
-    if (!items.length) { toast('Nothing saved yet'); return; }
+  function openReel(list){
+    list = Array.isArray(list) ? list : items;
+    if (!list.length) { toast('Nothing saved yet'); return; }
     const stage = $('#reelStage'); stage.textContent = '';
-    reelSlides = items.map(it => {
+    reelSlides = list.map(it => {
       const d = document.createElement('div');
       d.className = 'slide code-big ' + kind(it);
       d.append(codeNode(it, true));
@@ -683,7 +776,7 @@
     try { if (wakeLock) wakeLock.release(); } catch(e){}
     wakeLock = null;
   }
-  $('#reelBtn').addEventListener('click', openReel);
+  $('#reelBtn').addEventListener('click', () => openReel(items));
   $('#reelDone').addEventListener('click', closeReel);
   $('#reelPause').addEventListener('click', () => setReelPaused(!reelPaused));
   $('#reelStage').addEventListener('click', () => setReelPaused(!reelPaused));
@@ -695,7 +788,7 @@
 
   /* ---------- live scanner ---------- */
   let stream = null, scanning = false, loopT = null, busy = false, detector = null, zxReader = null, zxHints = null;
-  let lastVal = '', lastSeen = 0, cand = '', candN = 0, sessionCount = 0, resumeLater = false, torchOn = false, audioCtx = null;
+  let sessionId = null, lastVal = '', lastSeen = 0, cand = '', candN = 0, sessionCount = 0, resumeLater = false, torchOn = false, audioCtx = null;
   const setMsg = t => { $('#scanMsg').textContent = t; };
 
   function soundReady(){ return !!audioCtx && audioCtx.state === 'running'; }
@@ -740,6 +833,7 @@
 
   async function startScanner(){
     if (scanning) return;
+    if (!sessionId) sessionId = Date.now();
     $('#scan').hidden = false; document.body.classList.add('lock');
     $('#scanCount').textContent = sessionCount + ' saved';
     setMsg('Starting camera…');
@@ -769,8 +863,13 @@
     stopTracks();
     $('#scan').hidden = true;
     if ($('#show').hidden && $('#backdrop').hidden) document.body.classList.remove('lock');
-    if (sessionCount) toast(sessionCount + (sessionCount === 1 ? ' code' : ' codes') + ' saved');
-    sessionCount = 0;
+    const sid = sessionId, n = sessionCount;
+    sessionCount = 0; sessionId = null;
+    if (n) {
+      const f = getFolder(sid);
+      if (f) { openFolderView(sid); toast(plural(n) + ' saved to ' + folderName(f.last)); }
+      else toast(plural(n) + ' saved');
+    }
   }
   function camError(msg){
     stopTracks(); $('#scan').hidden = true;
@@ -843,7 +942,7 @@
     if (dup) { setMsg('Already saved: ' + (dup.name || 'Untitled')); flash('dup'); beep('dup'); return; }
     let photo = null;
     try { photo = toCanvas(v, 760).toDataURL('image/jpeg', 0.72); } catch(e){}
-    const it = {value: r.value, format: r.format, photo: photo};
+    const it = {value: r.value, format: r.format, photo: photo, session: sessionId};
     it.name = defaultName(it);
     saveItem(it);
     sessionCount++;

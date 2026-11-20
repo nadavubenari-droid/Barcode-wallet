@@ -202,6 +202,7 @@
     <span id="scanCount" class="chip">0 saved</span>
     <span class="grow"></span>
     <button id="soundBtn" class="chip on" type="button" hidden>🔇 Tap for sound</button>
+    <button id="lensBtn" class="chip" type="button" hidden></button>
     <button id="torchBtn" class="chip" type="button" hidden>Light</button>
     <button id="scanDone" class="chip strong" type="button">Done</button>
   </div>
@@ -561,11 +562,23 @@
   }
   async function decode(img){
     const c = toCanvas(img, 1600);
-    if ('BarcodeDetector' in window) {
-      try {
-        const r = await new BarcodeDetector().detect(c);
-        if (r && r.length && r[0].rawValue) return {value: r[0].rawValue, format: normFmt(r[0].format)};
-      } catch(e){}
+    await initDetector();
+    if (detector) {
+      for (const src of [c, crop(c, 0.5, 0.5, 4000)]) {
+        try {
+          const r = await detector.detect(src);
+          const hit = r && r.find(x => x.rawValue);
+          if (hit) return {value: hit.rawValue, format: normFmt(hit.format)};
+        } catch(e){}
+      }
+    }
+    await Promise.race([loadWasm(), new Promise(r => setTimeout(r, 8000))]);
+    if (wasmMod) {
+      const variants = [() => c, () => crop(c, 0.6, 0.6, 1600), () => rotated(c, 25), () => rotated(c, -25), () => rotated(c, 45), () => rotated(c, -45)];
+      for (const make of variants) {
+        try { const r = await wasmRead(make()); if (r) return r; } catch(e){}
+        await tick();
+      }
     }
     const Z = await waitZX(10000);
     if (!Z) return null;
@@ -858,8 +871,11 @@
     $('#scanCount').textContent = sessionCount + ' saved';
     setMsg('Starting camera…');
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return camError("This browser can't use the camera. Try opening the page in Chrome or Safari.");
+    initDetector();
     try {
-      stream = await navigator.mediaDevices.getUserMedia({audio: false, video: {facingMode: {ideal: 'environment'}, width: {ideal: 1280}, height: {ideal: 720}}});
+      const saved = lensSaved(), savedDev = saved.replace(/^zoom1?:/, '');
+      try { stream = await getStream(savedDev || null); }
+      catch(e){ if (!savedDev) throw e; stream = await getStream(null); }
     } catch(e){
       return camError(e && e.name === 'NotAllowedError'
         ? 'Camera access is blocked. Allow the camera for this site in your browser settings, then try again.'
@@ -868,14 +884,20 @@
     const v = $('#vid'); v.srcObject = stream;
     try { await v.play(); } catch(e){}
     setupTorch();
-    if (!detector && 'BarcodeDetector' in window) { try { detector = new BarcodeDetector(); } catch(e){ detector = null; } }
+    try { lenses = await buildLenses(); await useLens(pickLens()); } catch(e){}
+    if (!lenses.some(l => l.ultra)) {
+      let told = false; try { told = localStorage.getItem('barcode-wallet-noultra') === '1'; } catch(e){}
+      if (!told) { toast("This phone doesn't let websites use its ultra-wide camera, so the normal one is used"); try { localStorage.setItem('barcode-wallet-noultra', '1'); } catch(e){} }
+    }
+    await initDetector();
     scanning = true; cand = ''; candN = 0;
+    clearInterval(sceneT); sceneT = setInterval(sceneTick, 40);
     setMsg('Point at a barcode');
     updateSoundChip();
     loop();
   }
   function stopTracks(){
-    scanning = false; clearTimeout(loopT);
+    scanning = false; clearTimeout(loopT); clearInterval(sceneT);
     if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
     $('#vid').srcObject = null; torchOn = false;
   }
@@ -914,27 +936,156 @@
   });
   $('#scanDone').addEventListener('click', stopScanner);
 
-  const frameCanvas = document.createElement('canvas');
-  function grabCenter(v){
-    const vw = v.videoWidth, vh = v.videoHeight; if (!vw || !vh) return null;
-    const cw = Math.round(vw * 0.86), ch = Math.round(vh * 0.6);
-    const k = Math.min(1, 960 / cw);
-    frameCanvas.width = Math.round(cw * k); frameCanvas.height = Math.round(ch * k);
-    const ctx = frameCanvas.getContext('2d', {willReadFrequently: true});
-    ctx.drawImage(v, (vw - cw) / 2, (vh - ch) / 2, cw, ch, 0, 0, frameCanvas.width, frameCanvas.height);
-    return frameCanvas;
+  /* ---------- camera lenses ---------- */
+  const LENS_KEY = 'barcode-wallet-lens';
+  let lenses = [], lensIdx = -1;
+  const lensSaved = () => { try { return localStorage.getItem(LENS_KEY) || ''; } catch(e){ return ''; } };
+  const lensSave = k => { try { localStorage.setItem(LENS_KEY, k); } catch(e){} };
+  const isFront = l => /front|user|facetime|selfie/i.test(l || '');
+  function lensLabel(d, i){
+    const l = d.label || '';
+    if (/ultra/i.test(l)) return 'Ultra wide';
+    if (/tele/i.test(l)) return 'Telephoto';
+    if (/triple|dual/i.test(l)) return 'Auto';
+    if (/back camera$/i.test(l)) return 'Wide';
+    return 'Camera ' + (i + 1);
   }
+  function getStream(deviceId){
+    const video = {width: {ideal: 1920}, height: {ideal: 1080}};
+    if (deviceId) video.deviceId = {exact: deviceId}; else video.facingMode = {ideal: 'environment'};
+    return navigator.mediaDevices.getUserMedia({audio: false, video: video});
+  }
+  const curDevice = () => { try { return stream.getVideoTracks()[0].getSettings().deviceId || ''; } catch(e){ return ''; } };
+  async function buildLenses(){
+    const track = stream.getVideoTracks()[0];
+    const caps = track.getCapabilities ? track.getCapabilities() : {};
+    const cur = curDevice();
+    const out = [];
+    // Many Android phones only reach the ultra-wide lens by zooming out below 1×
+    if (caps.zoom && caps.zoom.min < 1) {
+      out.push({key: 'zoom:' + cur, name: 'Ultra wide', deviceId: cur, zoom: caps.zoom.min, ultra: true});
+      out.push({key: 'zoom1:' + cur, name: 'Normal', deviceId: cur, zoom: 1});
+    }
+    let devs = [];
+    try { devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput' && !isFront(d.label)); } catch(e){}
+    devs.forEach((d, i) => {
+      if (!d.deviceId || out.some(o => o.deviceId === d.deviceId)) return;
+      const name = lensLabel(d, i);
+      out.push({key: d.deviceId, name: name, deviceId: d.deviceId, ultra: name === 'Ultra wide'});
+    });
+    if (!out.length) out.push({key: cur, name: 'Camera', deviceId: cur});
+    return out;
+  }
+  function pickLens(){
+    let i = lenses.findIndex(l => l.key === lensSaved());
+    if (i < 0) i = lenses.findIndex(l => l.ultra);
+    if (i < 0) i = Math.max(0, lenses.findIndex(l => l.deviceId === curDevice()));
+    return i;
+  }
+  async function useLens(i){
+    const lens = lenses[i]; if (!lens) return;
+    const cur = curDevice();
+    if (lens.deviceId && cur && lens.deviceId !== cur) {
+      stream.getTracks().forEach(t => t.stop());
+      try { stream = await getStream(lens.deviceId); }
+      catch(e){ stream = await getStream(cur); }
+      const v = $('#vid'); v.srcObject = stream;
+      try { await v.play(); } catch(e){}
+      setupTorch();
+    }
+    const t = stream.getVideoTracks()[0];
+    try {
+      const caps = t.getCapabilities ? t.getCapabilities() : {};
+      const adv = [];
+      if (lens.zoom && caps.zoom) adv.push({zoom: Math.max(caps.zoom.min, Math.min(caps.zoom.max, lens.zoom))});
+      if (caps.focusMode && caps.focusMode.indexOf('continuous') >= 0) adv.push({focusMode: 'continuous'});
+      if (adv.length) await t.applyConstraints({advanced: adv});
+    } catch(e){}
+    lensIdx = i;
+    const b = $('#lensBtn');
+    b.textContent = '◎ ' + lens.name;
+    b.hidden = lenses.length < 2;
+  }
+  $('#lensBtn').addEventListener('click', async e => {
+    e.stopPropagation();
+    if (lenses.length < 2 || !stream) return;
+    const next = (lensIdx + 1) % lenses.length;
+    lensSave(lenses[next].key);
+    try { await useLens(next); setMsg(lenses[next].name + ' camera'); } catch(err){ toast("Couldn't switch camera"); }
+  });
+
+  /* ---------- barcode readers ----------
+     1. The phone's own barcode reader (Android Chrome) — fast and handles tilted, warped and curved codes.
+     2. Otherwise zxing-cpp (a strong reader compiled to WebAssembly), tried on the whole view, a close-up,
+        and tilted copies, so slanted and bent barcodes still line up.
+     3. Last resort: the older JavaScript reader. */
+  async function initDetector(){
+    if (detector !== null) return;
+    detector = false;
+    if ('BarcodeDetector' in window) {
+      try {
+        const f = await BarcodeDetector.getSupportedFormats();
+        if (f && f.length) detector = new BarcodeDetector({formats: f});
+      } catch(e){ detector = false; }
+    }
+    if (!detector) loadWasm();
+  }
+  let wasmMod = null, wasmLoading = null;
+  function loadWasm(){
+    if (!wasmLoading) wasmLoading = import('https://cdn.jsdelivr.net/npm/zxing-wasm@2/reader/+esm')
+      .then(m => { if (m && typeof m.readBarcodes === 'function') wasmMod = m; })
+      .catch(() => {});
+    return wasmLoading;
+  }
+  const WASM_OPTS = {tryHarder: true, tryRotate: true, tryInvert: true, tryDownscale: true, maxNumberOfSymbols: 1};
+  const WASM_FMT = {EAN13: 'EAN_13', EAN8: 'EAN_8', UPCA: 'UPC_A', UPCE: 'UPC_E', CODE128: 'CODE_128', CODE39: 'CODE_39', CODE93: 'CODE_93', QRCODE: 'QR_CODE', DATAMATRIX: 'DATA_MATRIX', PDF417: 'PDF_417', AZTEC: 'AZTEC', ITF: 'ITF', CODABAR: 'CODABAR'};
+  async function wasmRead(canvas){
+    if (!wasmMod || !canvas) return null;
+    const data = canvas.getContext('2d', {willReadFrequently: true}).getImageData(0, 0, canvas.width, canvas.height);
+    const res = await wasmMod.readBarcodes(data, WASM_OPTS);
+    const r = res && res.find(x => x.isValid !== false && x.text);
+    if (!r) return null;
+    const k = String(r.format || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return {value: r.text, format: WASM_FMT[k] || k || 'CODE_128'};
+  }
+  // a centred piece of the picture (fw, fh = fraction of width/height), at most `max` px
+  function crop(src, fw, fh, max){
+    const w = src.videoWidth || src.naturalWidth || src.width, h = src.videoHeight || src.naturalHeight || src.height;
+    if (!w || !h) return null;
+    const cw = Math.round(w * fw), ch = Math.round(h * fh), k = Math.min(1, max / Math.max(cw, ch));
+    const c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round(cw * k)); c.height = Math.max(1, Math.round(ch * k));
+    c.getContext('2d', {willReadFrequently: true}).drawImage(src, (w - cw) / 2, (h - ch) / 2, cw, ch, 0, 0, c.width, c.height);
+    return c;
+  }
+  function rotated(src, deg){
+    const r = deg * Math.PI / 180, sn = Math.abs(Math.sin(r)), cs = Math.abs(Math.cos(r));
+    const w = Math.round(src.width * cs + src.height * sn), h = Math.round(src.width * sn + src.height * cs);
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    const x = c.getContext('2d', {willReadFrequently: true});
+    x.fillStyle = '#fff'; x.fillRect(0, 0, w, h);
+    x.translate(w / 2, h / 2); x.rotate(r); x.drawImage(src, -src.width / 2, -src.height / 2);
+    return c;
+  }
+  let pass = 0;
   async function detectFrame(v){
+    pass++;
     if (detector) {
-      const r = await detector.detect(v);
-      return r && r.length && r[0].rawValue ? {value: r[0].rawValue, format: normFmt(r[0].format)} : null;
+      // every other check looks at a close-up of the middle, so small barcodes in a wide view still read
+      const src = pass % 2 ? v : (crop(v, 0.5, 0.5, 4000) || v);
+      const r = await detector.detect(src);
+      const hit = r && r.find(x => x.rawValue);
+      return hit ? {value: hit.rawValue, format: normFmt(hit.format)} : null;
+    }
+    if (wasmMod) {
+      const m = pass % 4;
+      const base = m === 0 ? crop(v, 1, 1, 1280) : crop(v, 0.6, 0.6, 1100);
+      if (!base) return null;
+      return await wasmRead(m === 2 ? rotated(base, 25) : m === 3 ? rotated(base, -25) : base);
     }
     const Z = window.ZXing; if (!Z) return null;
-    if (!zxReader) {
-      zxHints = new Map();
-      zxReader = new Z.MultiFormatReader(); zxReader.setHints(zxHints);
-    }
-    const c = grabCenter(v); if (!c) return null;
+    if (!zxReader) { zxHints = new Map(); zxReader = new Z.MultiFormatReader(); zxReader.setHints(zxHints); }
+    const c = crop(v, 0.86, 0.6, 960); if (!c) return null;
     try {
       const r = zxReader.decode(new Z.BinaryBitmap(new Z.HybridBinarizer(new Z.HTMLCanvasElementLuminanceSource(c))), zxHints);
       return r && r.getText() ? {value: r.getText(), format: normFmt(Z.BarcodeFormat[r.getBarcodeFormat()])} : null;
@@ -945,7 +1096,8 @@
     const v = $('#vid');
     if (v.readyState >= 2 && !busy) {
       busy = true;
-      try { const r = await detectFrame(v); trackScene(v, r); if (r) onCode(r, v); else candN = 0; } catch(e){}
+      const t0 = Date.now();
+      try { const r = await detectFrame(v); trackScene(r, t0); if (r) onCode(r, v, t0); else candN = 0; } catch(e){}
       busy = false;
     }
     loopT = setTimeout(loop, 60);
@@ -955,7 +1107,8 @@
      changed a lot from that picture (product taken away) and stayed changed for a moment. */
   const SIG_W = 32, SIG_H = 24;
   const SCENE_DIFF = 0.55;   // 0 = identical view, ~1.1 = completely different view
-  const CLEAR_MS = 120;      // first-to-last changed check; with checks every ~60ms this means the product was gone ~0.2s
+  const CLEAR_MS = 160;      // view checked every 40ms; changed for this long ≈ product gone 0.2s
+  let clearedAt = 0, sceneT = null;
   const sigCanvas = document.createElement('canvas'); sigCanvas.width = SIG_W; sigCanvas.height = SIG_H;
   const sigCtx = sigCanvas.getContext('2d', {willReadFrequently: true});
   function sceneSig(v){
@@ -970,22 +1123,30 @@
     return g;
   }
   function sigDiff(a, b){ let t = 0; for (let i = 0; i < a.length; i++) t += Math.abs(a[i] - b[i]); return t / a.length; }
-  function trackScene(v, r){
-    if (cleared || !scanSig) return;
-    if (r && r.value === lastVal) { clearStart = 0; return; }     // the product is still there
+  // runs on its own fast timer, separate from the (slower) barcode reading
+  function sceneTick(){
+    const v = $('#vid');
+    if (!scanning || cleared || !scanSig || v.readyState < 2) return;
     let d = 0;
     try { d = sigDiff(sceneSig(v), scanSig); } catch(e){ return; }
-    if (d < SCENE_DIFF) { clearStart = 0; return; }
     const now = Date.now();
+    if (d < SCENE_DIFF) { clearStart = 0; return; }
     if (!clearStart) clearStart = now;
-    else if (now - clearStart >= CLEAR_MS) { cleared = true; setMsg('Ready for the next item'); }
+    else if (now - clearStart >= CLEAR_MS) { cleared = true; clearedAt = now; setMsg('Ready for the next item'); }
+  }
+  // a read of the same barcode from a frame taken after the view changed means the product is back
+  function trackScene(r, t0){
+    if (cleared || !r || r.value !== lastVal) return;
+    if (clearStart && t0 > clearStart) clearStart = 0;
   }
 
-  function onCode(r, v){
+  function onCode(r, v, t0){
     const now = Date.now();
     // the same product hasn't left the view yet: not a new scan
     if (r.value === lastVal && !cleared) return;
-    if (!detector) {           // the fallback reader can misread, so need the same result twice
+    // a late result from a frame taken before the product left
+    if (r.value === lastVal && t0 && t0 < clearedAt) return;
+    if (!detector && !wasmMod) {   // the old fallback reader can misread, so need the same result twice
       if (r.value === cand) candN++; else { cand = r.value; candN = 1; }
       if (candN < 2) return;
     }

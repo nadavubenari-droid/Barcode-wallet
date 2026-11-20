@@ -1836,7 +1836,7 @@
   try { if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {}); } catch(e){}
   if (rowEl.checked) startScanner();
   setTimeout(() => {
-    items.filter(it => isGtin(it.value) && (!it.info || it.info.status !== 'done' || (!it.info.name && it.info.t < Date.now() - 6 * 3600e3))).slice(0, 40).forEach(it => analyzeLater({id: it.id}));
+    items.filter(it => isGtin(it.value) && (!it.info || it.info.status !== 'done' || it.info.country === undefined || (!it.info.name && it.info.t < Date.now() - 6 * 3600e3))).slice(0, 40).forEach(it => analyzeLater({id: it.id}));
   }, 2500);
 })();
 </script>

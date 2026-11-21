@@ -3238,9 +3238,15 @@
     try { d = sigDiff(sceneSig(v), scanSig); } catch(e){ return; }
     const now = Date.now();
     if (d < SCENE_DIFF) { clearStart = 0; return; }
-    if (!clearStart) clearStart = now;
+    if (!clearStart) { clearStart = now; return; }
+    // the view changed, but the barcode was seen again around where it was since then (the product
+    // was only turned, tilted or moved in the hand): it hasn't left
+    if (scanBoxPos && lastBox && lastBoxAt > clearStart && boxNear(lastBox, scanBoxPos)) { clearStart = 0; return; }
     else if (now - clearStart >= CLEAR_MS) { cleared = true; clearedAt = now; setMsg('Ready for the next item'); }
   }
+  let scanBoxPos = null;
+  const boxPos = (b, v) => { const vw = v.videoWidth || v.width, vh = v.videoHeight || v.height; return vw && vh ? {x: b.cx * b.scale / vw, y: b.cy * b.scale / vh} : null; };
+  const boxNear = (b, p) => { const q = boxPos(b, $('#vid')); return !!q && Math.abs(q.x - p.x) < 0.3 && Math.abs(q.y - p.y) < 0.3; };
   // a read of the same barcode from a frame taken after the view changed means the product is back
   function trackScene(r, t0){
     if (cleared || !r || r.value !== lastVal) return;
@@ -3266,12 +3272,15 @@
     if (r.value === lastVal && !cleared) return;
     // a late result from a frame taken before the product left
     if (r.value === lastVal && t0 && t0 < clearedAt) return;
+    // taking a product away and bringing it back takes longer than this: anything quicker is the same showing
+    if (r.value === lastVal && now - lastSeen < 700) return;
     if (!detector && !wasmMod) {   // the old fallback reader can misread, so need the same result twice
       if (r.value === cand) candN++; else { cand = r.value; candN = 1; }
       if (candN < 2) return;
     }
     lastVal = r.value; lastSeen = now;
     try { scanSig = sceneSig(v); cleared = false; clearStart = 0; } catch(e){ scanSig = null; cleared = true; }
+    scanBoxPos = lastBox && now - lastBoxAt < 300 ? boxPos(lastBox, v) : null;
     const n = (sessionVals.get(r.value) || 0) + 1;
     sessionVals.set(r.value, n);
     let photo = null;

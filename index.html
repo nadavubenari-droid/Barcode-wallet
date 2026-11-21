@@ -214,6 +214,11 @@
   .pos-row{display:grid;grid-template-columns:28px 1fr auto;gap:6px 8px;align-items:center;background:#151412;border:1px solid var(--line);border-radius:12px;padding:8px}
   .pos-row.doubt{border-color:#7a5a12}
   .film{position:fixed;inset:0;z-index:60;background:#000;display:flex;flex-direction:column}
+  .pos-row.flash{animation:rowflash 1.2s ease-out}
+  @keyframes rowflash{0%{box-shadow:0 0 0 3px #3ddc84}100%{box-shadow:0 0 0 0 transparent}}
+  .pos-shots{display:flex;gap:10px;overflow-x:auto;scroll-snap-type:x mandatory;margin:4px -4px 14px;padding:0 4px}
+  .pos-shots canvas{flex:none;width:min(78vw,420px);height:auto;border-radius:12px;scroll-snap-align:start;background:#000}
+  .pos-shots:only-child,.pos-shots canvas:only-child{width:100%}
   .film video{flex:1;min-height:0;width:100%;object-fit:contain}
   .film-top{position:absolute;top:calc(env(safe-area-inset-top) + 12px);left:0;right:0;text-align:center;color:#fff;font-weight:700;text-shadow:0 1px 4px #000}
   .film-bar{display:flex;gap:8px;align-items:center;padding:12px 12px calc(env(safe-area-inset-bottom) + 12px);background:#0e0d0b}
@@ -1298,7 +1303,7 @@
       }
       name = name.replace(/(?:^|\s)(?:x|×)\s?\d{1,2}\b|\b\d{1,2}\s?(?:x|×|יח['׳]?)(?=\s|$)|כמות[:\s]*\d{1,2}|(?:^|\s)-?\d{1,4}[.,]\d{1,2}(?=\s|$)/gi, ' ').replace(/\s{2,}/g, ' ').trim();
       const code = l.fix ? l.fix.code : l.code;
-      out.push({code: code, format: formatFor(code), name: name.slice(0, 60), qty: qty, sure: !!(l.fix && l.fix.sure), fixed: !!(l.fix && l.fix.fixed), partial: !!l.partial && !(l.fix && l.fix.sure), cut: !!l.cut, y: l.cy, x0: l.codeX, x1: l.codeX1});
+      out.push({code: code, format: formatFor(code), name: name.slice(0, 60), qty: qty, sure: !!(l.fix && l.fix.sure), fixed: !!(l.fix && l.fix.fixed), partial: !!l.partial && !(l.fix && l.fix.sure), cut: !!l.cut, y: l.cy, x0: l.codeX, x1: l.codeX1, y0: l.cy - medH * 0.7, y1: l.cy + medH * 0.7});
     }
     // many tills show how many items are on the bill ("פריטים 10"): used to check the count
     const label = ws.find(w => /פריטים|^items?$/i.test(w.text));
@@ -1336,7 +1341,8 @@
       const ta = new Set(normTokens(a.name)), tb = normTokens(b.name);
       return ta.size >= 2 && tb.length >= 2 && tb.filter(t => ta.has(t)).length >= Math.min(ta.size, tb.length) * 0.8;
     };
-    const pick = (a, b) => (b.sure && !a.sure ? b : a);   // keep the better reading of a shared row
+    // keep the better reading of a shared row; both readings remember which one was kept (for the photos)
+    const pick = (a, b) => { const k = b.sure && !a.sure ? b : a; if (a !== k) a.final = k; if (b !== k) b.final = k; return k; };
     const maxK = Math.min(acc.length, next.length);
     // a long overlap may have one row in four misread and still be the same rows
     const allowed = k => (k >= 3 ? Math.floor(k / 4) : 0);
@@ -1348,7 +1354,7 @@
     // a photo inside what we already have: nothing new
     if (next.length >= 2 && next.length > Math.max(kAfter, kBefore)) {
       for (let st = 0; st + next.length <= acc.length; st++) {
-        if (fits(next.length, j => acc[st + j], j => next[j])) return {list: acc, overlap: next.length, placed: 'inside'};
+        if (fits(next.length, j => acc[st + j], j => next[j])) { next.forEach((r, j) => { if (r !== acc[st + j]) r.final = acc[st + j]; }); return {list: acc, overlap: next.length, placed: 'inside'}; }
       }
     }
     if (kAfter && kAfter >= kBefore) {
@@ -1454,6 +1460,8 @@
     rows.sort((a, b) => a.y - b.y);
     rows = inColumn(rows);
     if (rows.length) ctx.deg = at.deg;
+    // a small copy of the (straightened) photo, to show the results on it afterwards
+    try { const th = toCanvas(pic, 1000); rows.pic = th; rows.picScale = th.width / pic.width; } catch(e){}
     return rows;
   }
   // photos are read as soon as they're taken or chosen, in the background, so the list is
@@ -1577,12 +1585,14 @@
     word = word || 'photo';
     const film = {};   // pictures from one film share the angle
     let list = [], notes = [], misses = 0, cut = false, tillCount = 0;
+    const shots = [];
     for (let i = 0; i < files.length; i++) {
       openSheet('<div class="working"><div class="spinner"></div><p></p></div>', null,
         el => el.querySelector('p').textContent = 'Reading ' + word + ' ' + (i + 1) + ' of ' + files.length + '…' + (i === 0 ? ' (the first time takes longer)' : ''));
       await tick();
       const rows = word === 'photo' ? await readScreenSoon(files[i]) : await readScreenPhoto(files[i], film);
       if (rows.tillCount) tillCount = Math.max(tillCount, rows.tillCount);
+      if (rows.pic && rows.length) shots.push({pic: rows.pic, scale: rows.picScale || 1, rows: rows.slice()});
       if (rows.some(r => r.cut)) cut = true;
       if (!rows.length) { misses++; if (word === 'photo') notes.push('Photo ' + (i + 1) + ': no products found'); continue; }
       const st = stitchLists(list, rows);
@@ -1595,7 +1605,7 @@
     const got = list.reduce((t, r) => t + (r.qty || 1), 0);
     if (tillCount && got !== tillCount) notes.push('The till shows ' + tillCount + ' items, ' + got + ' were found — check the list' + (got < tillCount ? ' (maybe a photo is missing some rows)' : ''));
     if (cut) notes.push('Some numbers ran off the edge of the ' + word + ' — keep the whole width of the screen in view');
-    reviewScreen(list, notes);
+    reviewScreen(list, notes, shots);
   }
 
   /* ----- filming the till screen ----- a still is taken about every 0.7 s (a very low frame rate),
@@ -1654,9 +1664,65 @@
     if (!keep.kept.length) { toast('Couldn’t read that video'); posSheet(); return; }
     readScreens(keep.kept, 'picture');
   }
-  function reviewScreen(list, notes){
-    const rows = list.map(r => ({...r}));
+  function reviewScreen(list, notes, shots){
+    shots = shots || [];
+    const rows = list.map(r => ({...r, src: r}));
+    // the results drawn on the photos: each product found, boxed and numbered in list order
+    const finalOf = r => { let k = r, g = 0; while (k.final && k.final !== k && g++ < 20) k = k.final; return k; };
+    const drawShots = el => {
+      const box = el.querySelector('.pos-shots'); if (!box) return;
+      box.textContent = '';
+      shots.forEach(sh => {
+        // show just the list part of the photo, so the numbers are big enough to check
+        const rs = sh.rows.filter(r => r.x1 > r.x0), S = sh.scale;
+        let ox = 0, oy = 0, cw = sh.pic.width, ch = sh.pic.height;
+        if (rs.length) {
+          const x0 = Math.min(...rs.map(r => r.x0)) * S, x1 = Math.max(...rs.map(r => r.x1)) * S;
+          const y0 = Math.min(...rs.map(r => r.y0)) * S, y1 = Math.max(...rs.map(r => r.y1)) * S;
+          const w = x1 - x0, row = rs.length > 1 ? (y1 - y0) / (rs.length - 1) : (y1 - y0) * 3;
+          ox = Math.max(0, x0 - 1.7 * w); oy = Math.max(0, y0 - 1.6 * row);
+          cw = Math.min(sh.pic.width, x1 + 0.45 * w) - ox; ch = Math.min(sh.pic.height, y1 + 1.2 * row) - oy;
+        }
+        const c = document.createElement('canvas'); c.width = Math.round(cw); c.height = Math.round(ch);
+        const x = c.getContext('2d');
+        x.drawImage(sh.pic, ox, oy, cw, ch, 0, 0, cw, ch);
+        x.translate(-ox, -oy);
+        x.fillStyle = 'rgba(0,0,0,.18)'; x.fillRect(ox, oy, cw, ch);   // dim the photo a little so the marks stand out
+        const u = Math.max(1.2, cw / 300);
+        sh.rows.forEach(pr => {
+          const n = rows.findIndex(r => r.src === finalOf(pr)) + 1;
+          const bx = pr.x0 * sh.scale - 4 * u, by = pr.y0 * sh.scale - 2 * u, bw = (pr.x1 - pr.x0) * sh.scale + 8 * u, bh = (pr.y1 - pr.y0) * sh.scale + 4 * u;
+          if (!(bw > 0 && bh > 0)) return;
+          const doubt = n && !rows[n - 1].sure;
+          const col = !n ? 'rgba(160,160,160,.9)' : doubt ? '#f2b33d' : '#3ddc84';
+          x.lineWidth = 1.5 * u; x.strokeStyle = col;
+          if (!n) x.setLineDash([3 * u, 2 * u]); else x.setLineDash([]);
+          x.fillStyle = !n ? 'rgba(160,160,160,.12)' : doubt ? 'rgba(242,179,61,.18)' : 'rgba(61,220,132,.18)';
+          x.beginPath(); x.roundRect ? x.roundRect(bx, by, bw, bh, 3 * u) : x.rect(bx, by, bw, bh); x.fill(); x.stroke();
+          x.setLineDash([]);
+          if (!n) return;   // removed from the list
+          const r = Math.max(9 * u, bh * 0.55), cx = bx - r - 2 * u, cy = by + bh / 2;
+          x.beginPath(); x.arc(cx, cy, r, 0, Math.PI * 2); x.fillStyle = col; x.fill();
+          x.lineWidth = 1 * u; x.strokeStyle = 'rgba(0,0,0,.35)'; x.stroke();
+          x.fillStyle = '#0e0d0b'; x.font = '800 ' + Math.round(r * 1.15) + 'px system-ui,sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
+          x.fillText(String(n), cx, cy + r * 0.05);
+        });
+        // tap a product on the photo: jump to its row in the list
+        c.onclick = ev => {
+          const rc = c.getBoundingClientRect(), k = c.width / rc.width;
+          const px = (ev.clientX - rc.left) * k + ox, py = (ev.clientY - rc.top) * k + oy;
+          let bestR = null, bestD = Infinity;
+          sh.rows.forEach(pr => { const d = Math.abs(py - (pr.y0 + pr.y1) / 2 * S) + Math.max(0, pr.x0 * S - px - 30 * u, px - pr.x1 * S); if (d < bestD) { bestD = d; bestR = pr; } });
+          const n = bestR ? rows.findIndex(r => r.src === finalOf(bestR)) : -1;
+          const rowEl = n >= 0 ? el.querySelectorAll('.pos-row')[n] : null;
+          if (rowEl) { rowEl.scrollIntoView({behavior: 'smooth', block: 'center'}); rowEl.classList.remove('flash'); void rowEl.offsetWidth; rowEl.classList.add('flash'); }
+        };
+        box.append(c);
+      });
+      box.hidden = !shots.length;
+    };
     const draw = el => {
+      drawShots(el);
       const box = el.querySelector('.pos-rows'); box.textContent = '';
       rows.forEach((r, i) => {
         const d = document.createElement('div'); d.className = 'pos-row' + (r.sure ? '' : ' doubt');
@@ -1673,7 +1739,7 @@
       const total = rows.reduce((n, r) => n + (r.code ? r.qty : 0), 0);
       el.querySelector('[data-act="make"]').textContent = 'Create folder (' + total + (total === 1 ? ' barcode)' : ' barcodes)');
     };
-    openSheet('<h2>Products on the screen</h2><p class="pos-note"></p><div class="pos-rows"></div>' +
+    openSheet('<h2>Products on the screen</h2><p class="pos-note"></p><div class="pos-shots" hidden></div><div class="pos-rows"></div>' +
       '<div class="col"><button class="btn" data-act="add">+ Add a row</button><button class="btn primary" data-act="make">Create folder</button><button class="btn ghost" data-act="cancel">Cancel</button></div>',
       {
         add: () => { rows.push({code: '', format: 'CODE_128', name: '', qty: 1, sure: false}); draw($('#sheet')); const ins = $('#sheet').querySelectorAll('.pos-row .code'); if (ins.length) ins[ins.length - 1].focus(); },
@@ -3308,7 +3374,7 @@
   }
   let pass = 0, lastBox = null, lastBoxAt = 0;
   const frameBuf = []; let lastBufAt = 0;
-  window.__bwTest = {saveItem: it => saveItem(it), count: () => items.length, reviewScreen: (l, n) => reviewScreen(l, n), parseScreen: (w, o) => parseScreen(w, o), completeRows: r => completeRows(r), stitchLists: (a, b) => stitchLists(a, b), locate: locate, straighten: straighten, searchByWords: (w, s, t) => searchByWords(w, s, t), studyState: () => ({segs: videoSegs.length, marks: videoMarks.length, recording: !!rec}), readClues: readClues, similarProducts: similarProducts, barcodeNeighbours: barcodeNeighbours, packageColour: packageColour, aroundBarcode: aroundBarcode};
+  window.__bwTest = {saveItem: it => saveItem(it), count: () => items.length, reviewScreen: (l, n, s) => reviewScreen(l, n, s), inColumn: r => inColumn(r), overWords: (d, w) => overWords(d, w), toCanvas: (i, m) => toCanvas(i, m), parseScreen: (w, o) => parseScreen(w, o), completeRows: r => completeRows(r), stitchLists: (a, b) => stitchLists(a, b), locate: locate, straighten: straighten, searchByWords: (w, s, t) => searchByWords(w, s, t), studyState: () => ({segs: videoSegs.length, marks: videoMarks.length, recording: !!rec}), readClues: readClues, similarProducts: similarProducts, barcodeNeighbours: barcodeNeighbours, packageColour: packageColour, aroundBarcode: aroundBarcode};
   async function detectFrame(v){
     pass++;
     let box = null;

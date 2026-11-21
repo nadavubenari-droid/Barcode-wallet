@@ -277,6 +277,9 @@
   .reel-stage .slide.countdown.on{display:flex}
   .slide.countdown.on{animation:cd-pop 1s ease-out}
   @keyframes cd-pop{0%{transform:scale(.6);opacity:0}25%{transform:scale(1);opacity:1}85%{opacity:1}100%{opacity:.2}}
+  .reel-move{display:flex;align-items:center;justify-content:center;animation:reel-drift .8s ease-in-out infinite}
+  @keyframes reel-drift{0%{transform:translate(0,0) rotate(0)}25%{transform:translate(7px,-4px) rotate(1.5deg)}50%{transform:translate(0,4px) rotate(0) scale(1.03)}75%{transform:translate(-7px,-3px) rotate(-1.5deg)}100%{transform:translate(0,0) rotate(0)}}
+  @media (prefers-reduced-motion: reduce){.reel-move{animation-duration:1.6s}}
 </style>
 </head>
 <body>
@@ -1518,7 +1521,11 @@
       const node = codeNode(it, true);
       const sc = REPEAT_SCALES[k % REPEAT_SCALES.length];
       if (sc !== 1) { node.style.transform = 'scale(' + sc + ')'; node.style.transformOrigin = 'center'; }
-      d.append(node);
+      // a gentle drift while it's shown, so the till's scanner sees it from slightly changing angles
+      const mover = document.createElement('div'); mover.className = 'reel-move';
+      mover.style.animationDelay = (-(i * 0.17) % 0.8).toFixed(2) + 's';
+      mover.append(node);
+      d.append(mover);
       stage.append(d);
       reelSlides.push({el: d, it: it, n: i + 1, ms: REEL_MS});
     });

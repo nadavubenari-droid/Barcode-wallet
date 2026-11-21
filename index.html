@@ -1203,21 +1203,50 @@
   }
 
   // read one photo of a till screen: the words (Hebrew + English) and a digits-only pass, at the angle that works
-  async function readScreenPhoto(file){
+  // a quick look for the angle: numbers only, on a small copy, so the full (slow) reading runs once
+  async function screenAngle(big, degs){
+    const small = toCanvas(big, 1300);
+    let best = {deg: 0, score: -1};
+    for (const deg of degs) {
+      let score = 0;
+      try {
+        const r = await ocrWorker.recognize(enhance(deg ? rotated(small, deg) : small, 0.4));
+        for (const m of String(r.data.text || '').match(/\d{8,14}/g) || []) score += gtinOk(m) ? 3 : 1;
+      } catch(e){}
+      if (score > best.score) best = {deg: deg, score: score};
+      if (score >= 6) break;   // clearly readable: no need to try more angles
+    }
+    return best;
+  }
+  async function readScreenPhoto(file, ctx){
+    ctx = ctx || {};
     let img;
     if (file instanceof HTMLCanvasElement) img = file;
     else { try { img = await loadImage(file); } catch(e){ return []; } }
-    const base = toCanvas(img, 2400);
-    const big = base.width < 1700 ? upscale(base, 2200) : base;
+    const base = toCanvas(img, 2000);
+    const big = base.width < 1400 ? upscale(base, 1800) : base;
     await loadLabelOCR(); await loadOCR();
     const toWords = data => wordsOf(data || {}).filter(w => w && w.bbox).map(w => ({text: w.text, conf: w.confidence, x0: w.bbox.x0, y0: w.bbox.y0, x1: w.bbox.x1, y1: w.bbox.y1}));
     let best = [];
-    // straight first, then slightly tilted (a photo taken from the side), then sideways / upside down
-    for (const deg of [0, 5, -5, 9, -9, 180, 90, -90]) {
+    // the angle: the one found in the last picture of the same film, or a quick look —
+    // straight and slightly tilted first, sideways / upside down only if nothing showed
+    let degs = [0];
+    if (ocrWorker) {
+      if (ctx.deg != null) degs = [ctx.deg];
+      else {
+        let a = await screenAngle(big, [0, 5, -5, 9, -9]);
+        if (a.score <= 0) a = await screenAngle(big, [180, 90, -90]);
+        degs = [a.score > 0 ? a.deg : 0];
+      }
+    }
+    for (const deg of degs) {
       const pic = enhance(deg ? rotated(big, deg) : big, 0.4);
       let words = [], digits = [];
-      if (lblWorker) { try { const r = await withLabelWorker(w => w.recognize(pic, {}, {blocks: true, text: true})); words = toWords(r.data); } catch(e){} }
-      if (ocrWorker) { try { const r = await ocrWorker.recognize(pic, {}, {blocks: true, text: true}); digits = toWords(r.data); } catch(e){} }
+      // the word reading and the number reading run side by side
+      await Promise.all([
+        lblWorker ? withLabelWorker(w => w.recognize(pic, {}, {blocks: true, text: true})).then(r => { words = toWords(r.data); }).catch(() => {}) : null,
+        ocrWorker ? ocrWorker.recognize(pic, {}, {blocks: true, text: true}).then(r => { digits = toWords(r.data); }).catch(() => {}) : null
+      ]);
       const opts = {w: pic.width};
       // the digits-only reading is better at numbers: its long numbers replace whatever the word
       // reading made of the same spot, so each code still gets the name written next to it
@@ -1234,8 +1263,10 @@
       rows.sort((a, b) => a.y - b.y);
       const score = rs => rs.filter(r => r.sure).length * 2 + rs.filter(r => r.partial).length;
       if (score(rows) > score(best) || (!best.length && rows.length)) best = rows;
-      if (best.filter(r => r.sure).length >= 2 && deg === 0 || best.filter(r => r.sure).length >= 3) break;
+      if (rows.length) ctx.deg = deg;
     }
+    // a remembered angle that found nothing this time: look again
+    if (!best.length && ctx.deg != null && degs.length === 1 && !ctx.retry) { ctx.deg = null; ctx.retry = true; best = await readScreenPhoto(file, ctx); ctx.retry = false; }
     return best;
   }
   // a number cut off at the photo's edge: the missing digits come from the product list —
@@ -1298,12 +1329,13 @@
   });
   async function readScreens(files, word){
     word = word || 'photo';
+    const film = {};   // pictures from one film share the angle
     let list = [], notes = [], misses = 0, cut = false;
     for (let i = 0; i < files.length; i++) {
       openSheet('<div class="working"><div class="spinner"></div><p></p></div>', null,
         el => el.querySelector('p').textContent = 'Reading ' + word + ' ' + (i + 1) + ' of ' + files.length + '…' + (i === 0 ? ' (the first time takes longer)' : ''));
       await tick();
-      const rows = await readScreenPhoto(files[i]);
+      const rows = await readScreenPhoto(files[i], word === 'photo' ? {} : film);
       if (rows.some(r => r.cut)) cut = true;
       if (!rows.length) { misses++; if (word === 'photo') notes.push('Photo ' + (i + 1) + ': no products found'); continue; }
       const st = stitchLists(list, rows);

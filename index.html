@@ -215,6 +215,16 @@
   .pos-row.doubt{border-color:#7a5a12}
   .film{position:fixed;inset:0;z-index:60;background:#000;display:flex;flex-direction:column}
   .till-btn{width:100%;margin:-4px 0 14px}
+  .reading-pics{display:flex;gap:10px;overflow-x:auto;padding:4px 2px 10px;scroll-snap-type:x proximity}
+  .reading-pics .rp{position:relative;margin:0;flex:none;width:min(62vw,300px);scroll-snap-align:center;transition:width .2s}
+  .reading-pics .rp.big{width:min(92vw,520px)}
+  .reading-pics img{width:100%;display:block;border-radius:12px;border:2px solid transparent;opacity:.7;transition:opacity .2s}
+  .reading-pics .rp.now img{border-color:#ee7743;opacity:1}
+  .reading-pics .rp.done img,.reading-pics .rp.none img{opacity:1}
+  .reading-pics figcaption{position:absolute;top:8px;left:8px;min-width:28px;height:28px;border-radius:14px;background:#0e0d0b;color:#f2ede4;font:800 14px/28px system-ui,sans-serif;text-align:center;padding:0 6px}
+  .reading-pics .rp.now figcaption{background:#ee7743;color:#0e0d0b}
+  .reading-pics .rp.done figcaption::after{content:' ✓'}
+  .reading-pics .rp.none figcaption::after{content:' –'}
   .seg{display:flex;background:var(--card,#1a1814);border:1px solid #3a362f;border-radius:12px;padding:3px;margin:0 0 12px}
   .seg button{flex:1;border:0;background:transparent;color:inherit;font:600 15px system-ui,sans-serif;padding:9px;border-radius:9px}
   .seg button.on{background:#f2ede4;color:#0e0d0b}
@@ -1693,13 +1703,29 @@
     const film = {};   // pictures from one film share the angle
     let list = [], notes = [], misses = 0, cut = false, tillCount = 0;
     const shots = [];
+    // the photos stay on screen while they're read: the one being read is lit, finished ones get a tick
+    const urls = files.map(f => { try { return f instanceof HTMLCanvasElement ? toCanvas(f, 900).toDataURL('image/jpeg', 0.8) : URL.createObjectURL(f); } catch(e){ return ''; } });
+    let wEl = null;
+    openSheet('<div class="working"><div class="spinner"></div><p></p></div><div class="reading-pics"></div>', null, el => {
+      wEl = el;
+      const box = el.querySelector('.reading-pics');
+      urls.forEach((u, k) => {
+        const f = document.createElement('figure'); f.className = 'rp';
+        f.innerHTML = '<img alt=""><figcaption></figcaption>';
+        f.querySelector('img').src = u; f.querySelector('figcaption').textContent = k + 1;
+        f.onclick = () => f.classList.toggle('big');   // tap to see it larger
+        box.append(f);
+      });
+    });
+    const mark = (i, st) => { const f = wEl && wEl.querySelectorAll('.rp')[i]; if (f) { f.classList.remove('now'); if (st) f.classList.add(st); if (st === 'now') f.scrollIntoView({behavior: 'smooth', block: 'nearest', inline: 'center'}); } };
     for (let i = 0; i < files.length; i++) {
-      openSheet('<div class="working"><div class="spinner"></div><p></p></div>', null,
-        el => el.querySelector('p').textContent = 'Reading ' + word + ' ' + (i + 1) + ' of ' + files.length + '…' + (i === 0 ? ' (the first time takes longer)' : ''));
+      if (wEl) wEl.querySelector('p').textContent = 'Reading ' + word + ' ' + (i + 1) + ' of ' + files.length + '…' + (i === 0 ? ' (the first time takes longer)' : '');
+      mark(i, 'now');
       await tick();
       const rows = word === 'photo' ? await readScreenSoon(files[i]) : await readScreenPhoto(files[i], film);
       if (rows.tillCount) tillCount = Math.max(tillCount, rows.tillCount);
       if (rows.pic) shots.push({pic: rows.pic, scale: rows.picScale || 1, rows: rows.slice(), orig: rows.orig});
+      mark(i, rows.length ? 'done' : 'none');
       if (rows.some(r => r.cut)) cut = true;
       if (!rows.length) { misses++; if (word === 'photo') notes.push('Photo ' + (i + 1) + ': no products found'); continue; }
       const st = stitchLists(list, rows);
@@ -1712,6 +1738,7 @@
     const got = list.reduce((t, r) => t + (r.qty || 1), 0);
     if (tillCount && got !== tillCount) notes.push('The till shows ' + tillCount + ' items, ' + got + ' were found — check the list' + (got < tillCount ? ' (maybe a photo is missing some rows)' : ''));
     if (cut) notes.push('Some numbers ran off the edge of the ' + word + ' — keep the whole width of the screen in view');
+    urls.forEach(u => { if (u && u.startsWith('blob:')) setTimeout(() => URL.revokeObjectURL(u), 1000); });
     reviewScreen(list, notes, shots);
   }
 

@@ -1414,23 +1414,30 @@
     const maxK = Math.min(acc.length, next.length);
     // a long overlap may have one row in four misread and still be the same rows
     const allowed = k => (k >= 3 ? Math.floor(k / 4) : 0);
-    const fits = (k, a, b) => { let bad = 0; for (let j = 0; j < k; j++) if (!same(a(j), b(j))) bad++; return bad <= allowed(k) && bad < k; };
-    // the largest overlap either way wins (a small one can be a coincidence, with products bought twice)
-    let kAfter = 0, kBefore = 0;
-    for (let k = maxK; k >= 1 && !kAfter; k--) if (fits(k, j => acc[acc.length - k + j], j => next[j])) kAfter = k;
-    for (let k = maxK; k >= 1 && !kBefore; k--) if (fits(k, j => next[next.length - k + j], j => acc[j])) kBefore = k;
-    // a photo inside what we already have: nothing new
-    if (next.length >= 2 && next.length > Math.max(kAfter, kBefore)) {
-      for (let st = 0; st + next.length <= acc.length; st++) {
-        if (fits(next.length, j => acc[st + j], j => next[j])) { next.forEach((r, j) => { if (r !== acc[st + j]) r.final = acc[st + j]; }); return {list: acc, overlap: next.length, placed: 'inside'}; }
-      }
+    const bads = (k, a, b) => { let bad = 0; for (let j = 0; j < k; j++) if (!same(a(j), b(j))) bad++; return bad; };
+    // every way the new photo could fit: after, before, or inside what we have. Each misread row
+    // costs more than an extra matching row is worth, so an exact fit beats a bigger, sloppier one
+    const opts = [];
+    for (let k = maxK; k >= 1; k--) {
+      const ba = bads(k, j => acc[acc.length - k + j], j => next[j]);
+      if (ba <= allowed(k) && ba < k) opts.push({how: 'after', k: k, bad: ba});
+      const bb = bads(k, j => next[next.length - k + j], j => acc[j]);
+      if (bb <= allowed(k) && bb < k) opts.push({how: 'before', k: k, bad: bb});
     }
-    if (kAfter && kAfter >= kBefore) {
-      const k = kAfter;
+    if (next.length >= 2) for (let st = 0; st + next.length <= acc.length; st++) {
+      const bi = bads(next.length, j => acc[st + j], j => next[j]);
+      if (bi <= allowed(next.length) && bi < next.length) opts.push({how: 'inside', k: next.length, bad: bi, st: st});
+    }
+    const score = o => o.k - 3 * o.bad;
+    opts.sort((p, q) => score(q) - score(p) || (p.how === 'after' ? -1 : 1));
+    const o = opts[0];
+    if (o && o.how === 'inside') { next.forEach((r, j) => { if (r !== acc[o.st + j]) r.final = acc[o.st + j]; }); return {list: acc, overlap: o.k, placed: 'inside'}; }
+    if (o && o.how === 'after') {
+      const k = o.k;
       return {list: acc.slice(0, acc.length - k).concat(acc.slice(acc.length - k).map((r, j) => pick(r, next[j])), next.slice(k)), overlap: k, placed: 'after'};
     }
-    if (kBefore) {
-      const k = kBefore;
+    if (o && o.how === 'before') {
+      const k = o.k;
       return {list: next.slice(0, next.length - k).concat(acc.slice(0, k).map((r, j) => pick(r, next[next.length - k + j])), acc.slice(k)), overlap: k, placed: 'before'};
     }
     return {list: acc.concat(next), overlap: 0, placed: 'after'};

@@ -1326,14 +1326,18 @@
       out.push({code: code, format: formatFor(code), name: name.slice(0, 60), qty: qty, sure: !!(l.fix && l.fix.sure), fixed: !!(l.fix && l.fix.fixed), partial: !!l.partial && !(l.fix && l.fix.sure), cut: !!l.cut, y: l.cy, x0: l.codeX, x1: l.codeX1, y0: l.cy - medH * 0.7, y1: l.cy + medH * 0.7});
     }
     // many tills show how many items are on the bill ("פריטים 10"): used to check the count
-    const label = ws.find(w => /פריטים|^items?$/i.test(w.text));
-    if (label) {
-      const h = label.y1 - label.y0, cy = (label.y0 + label.y1) / 2;
-      const num = ws.filter(w => /^\d{1,3}$/.test(w.text) && Math.abs((w.y0 + w.y1) / 2 - cy) < h * 1.2 && Math.min(Math.abs(w.x1 - label.x0), Math.abs(label.x1 - w.x0)) < h * 3)
-        .sort((p, q) => Math.min(Math.abs(p.x1 - label.x0), Math.abs(label.x1 - p.x0)) - Math.min(Math.abs(q.x1 - label.x0), Math.abs(label.x1 - q.x0)))[0];
-      if (num && +num.text > 0) out.tillCount = +num.text;
-    }
+    const tc = tillCountOf(ws); if (tc) out.tillCount = tc;
     return out;
+  }
+  // the till's own item count, written next to "פריטים" ("items")
+  function tillCountOf(words){
+    const ws = words.filter(w => w && w.text).map(w => ({...w, text: String(w.text).trim()}));
+    const label = ws.find(w => /פריטים|^items?$/i.test(w.text));
+    if (!label) return 0;
+    const h = label.y1 - label.y0, cy = (label.y0 + label.y1) / 2;
+    const dist = w => Math.min(Math.abs(w.x1 - label.x0), Math.abs(label.x1 - w.x0));
+    const num = ws.filter(w => /^\d{1,3}$/.test(w.text) && Math.abs((w.y0 + w.y1) / 2 - cy) < h * 1.2 && dist(w) < h * 3).sort((p, q) => dist(p) - dist(q))[0];
+    return num && +num.text > 0 ? +num.text : 0;
   }
   // after joining the two readings: keep only rows in the barcode column (a number found by the
   // digits-only reading in the header or among the prices is not a product)
@@ -1347,7 +1351,15 @@
     const mid = r => (r.x0 + r.x1) / 2;
     const mids = col.map(mid).sort((p, q) => p - q), m = mids[mids.length >> 1];
     const wid = col.map(r => r.x1 - r.x0).sort((p, q) => p - q)[col.length >> 1];
-    const kept = rows.filter(r => !(r.x1 > r.x0) || Math.abs(mid(r) - m) < wid * 0.6);
+    let kept = rows.filter(r => !(r.x1 > r.x0) || Math.abs(mid(r) - m) < wid * 0.6);
+    // the rows of a till stand at a regular spacing: a doubtful number between them (usually a
+    // product name the number reader turned into digits) is not a row
+    const ys = col.map(r => r.y).sort((p, q) => p - q), gaps = [];
+    for (let i = 1; i < ys.length; i++) gaps.push(ys[i] - ys[i - 1]);
+    const hc = col.map(r => r.y1 - r.y0).sort((p, q) => p - q)[col.length >> 1] / 1.4;
+    const mg = Math.min(...gaps), pitch = mg > 0 ? mg / Math.max(1, Math.round(mg / (3.7 * hc))) : 0;
+    if (pitch > 0) kept = kept.filter(r => r.sure || ((r.code.length === 13 || r.code.length === 12 || r.partial) &&
+      ys.some(y => { const k = (r.y - y) / pitch; return Math.abs(k - Math.round(k)) < 0.25; })));
     if (rows.tillCount) kept.tillCount = rows.tillCount;
     return kept;
   }
@@ -1404,91 +1416,83 @@
     }
     return best;
   }
+  // Reading a till screen, fast: only what matters is read — the column of barcodes and the item count.
+  // Names come from the product list (by barcode), not from reading the screen, which is the slow part.
   async function readScreenPhoto(file, ctx){
     ctx = ctx || {};
     let img;
     if (file instanceof HTMLCanvasElement) img = file;
     else { try { img = await loadImage(file); } catch(e){ return []; } }
-    const base = toCanvas(img, 2000);
-    const big = base.width < 1400 ? upscale(base, 1800) : base;
+    const base = toCanvas(img, 1600);
+    const big = base.width < 1100 ? upscale(base, 1500) : base;
     await loadOCR();
-    const toWords = (data, ox, oy) => wordsOf(data || {}).filter(w => w && w.bbox).map(w => ({text: w.text, conf: w.confidence, x0: w.bbox.x0 + (ox || 0), y0: w.bbox.y0 + (oy || 0), x1: w.bbox.x1 + (ox || 0), y1: w.bbox.y1 + (oy || 0)}));
-    const validCodes = ds => ds.filter(d => { const c = String(d.text).replace(/\D/g, ''); return (c.length === 13 || c.length === 12 || c.length === 8) && gtinOk(c); });
-    // 1. the numbers first (fast): straight, or the angle remembered from the last picture of a film;
-    //    other angles only when that doesn't show barcodes
+    if (!ocrWorker) return [];
+    const toWords = (data, ox, oy, k) => wordsOf(data || {}).filter(w => w && w.bbox).map(w => ({text: w.text, conf: w.confidence, x0: w.bbox.x0 / (k || 1) + (ox || 0), y0: w.bbox.y0 / (k || 1) + (oy || 0), x1: w.bbox.x1 / (k || 1) + (ox || 0), y1: w.bbox.y1 / (k || 1) + (oy || 0)}));
+    const isCode = c => (c.length === 13 || c.length === 12 || c.length === 8) && gtinOk(c);
+    const validCodes = ds => ds.filter(d => isCode(String(d.text).replace(/\D/g, '')));
+    // 1. one quick look at the whole photo, numbers only — straight, or at the film's angle
     const digitsAt = async deg => {
-      const pic = enhance(deg ? rotated(big, deg) : big, 0.4);
+      const pic = deg ? rotated(big, deg) : big;
       let ds = [];
-      try { const r = await ocrWorker.recognize(pic, {}, {blocks: true, text: true}); ds = toWords(r.data); } catch(e){}
+      try { const r = await ocrWorker.recognize(enhance(pic, 0.4), {}, {blocks: true, text: true}); ds = toWords(r.data); } catch(e){}
       return {deg: deg, pic: pic, digits: ds};
     };
-    if (!ocrWorker) return [];
     let at = await digitsAt(ctx.deg != null ? ctx.deg : 0);
-    if (validCodes(at.digits).length < 2) {
+    if (validCodes(at.digits).length < 2) {   // nothing readable straight: the photo is turned
       let a = await screenAngle(big, [5, -5, 9, -9].filter(d => d !== at.deg));
       if (a.score <= 0) a = await screenAngle(big, [180, 90, -90]);
       if (a.score > 0 && a.deg !== at.deg) { const b = await digitsAt(a.deg); if (validCodes(b.digits).length > validCodes(at.digits).length) at = b; }
     }
-    // straighten by the barcodes themselves: they stand in one column, so its slant is the photo's tilt
-    {
-      const cs = validCodes(at.digits);
-      if (cs.length >= 3) {
-        const ys = cs.map(d => (d.y0 + d.y1) / 2), xs = cs.map(d => d.x0);
-        const my = ys.reduce((t, v) => t + v, 0) / ys.length, mx = xs.reduce((t, v) => t + v, 0) / xs.length;
-        let num = 0, den = 0;
-        ys.forEach((y, k) => { num += (y - my) * (xs[k] - mx); den += (y - my) * (y - my); });
-        const tilt = den ? Math.atan(num / den) * 180 / Math.PI : 0;
-        if (Math.abs(tilt) > 0.8 && Math.abs(tilt) < 15) {
-          const b = await digitsAt(at.deg + tilt);
-          if (validCodes(b.digits).length >= cs.length) at = b;
-        }
+    // 2. tilted? straighten by the slant of the barcode column, and read just that column again, close up
+    const cs = validCodes(at.digits);
+    if (cs.length >= 3) {
+      const ys = cs.map(d => (d.y0 + d.y1) / 2), xs = cs.map(d => d.x0);
+      const my = ys.reduce((t, v) => t + v, 0) / ys.length, mx = xs.reduce((t, v) => t + v, 0) / xs.length;
+      let num = 0, den = 0; ys.forEach((y, k) => { num += (y - my) * (xs[k] - mx); den += (y - my) * (y - my); });
+      const tilt = den ? Math.atan(num / den) * 180 / Math.PI : 0;
+      if (Math.abs(tilt) > 0.8 && Math.abs(tilt) < 15) {
+        const deg = at.deg + tilt, pic = rotated(big, deg);
+        // where the column lands after turning: turn its corners the same way
+        const th = tilt * Math.PI / 180, c0x = at.pic.width / 2, c0y = at.pic.height / 2, c1x = pic.width / 2, c1y = pic.height / 2;
+        const turn = (x, y) => { const dx = x - c0x, dy = y - c0y; return [dx * Math.cos(th) - dy * Math.sin(th) + c1x, dx * Math.sin(th) + dy * Math.cos(th) + c1y]; };
+        const pts = cs.flatMap(d => [turn(d.x0, d.y0), turn(d.x1, d.y1), turn(d.x0, d.y1), turn(d.x1, d.y0)]);
+        const hc = cs.map(d => d.y1 - d.y0).sort((p, q) => p - q)[cs.length >> 1];
+        const X0 = Math.max(0, Math.min(...pts.map(p => p[0])) - 2 * hc), X1 = Math.min(pic.width, Math.max(...pts.map(p => p[0])) + 2 * hc);
+        const Y0 = Math.max(0, Math.min(...pts.map(p => p[1])) - 9 * hc), Y1 = Math.min(pic.height, Math.max(...pts.map(p => p[1])) + 9 * hc);
+        const k = hc < 26 ? 26 / hc : 1;   // digits about 26px tall read best
+        const c = document.createElement('canvas'); c.width = Math.round((X1 - X0) * k); c.height = Math.round((Y1 - Y0) * k);
+        const g = c.getContext('2d'); g.imageSmoothingQuality = 'high'; g.drawImage(pic, X0, Y0, X1 - X0, Y1 - Y0, 0, 0, c.width, c.height);
+        let ds = [];
+        try { const r = await ocrWorker.recognize(enhance(c, 0.4), {}, {blocks: true, text: true}); ds = toWords(r.data, X0, Y0, k); } catch(e){}
+        if (validCodes(ds).length >= cs.length) at = {deg: deg, pic: pic, digits: ds};
       }
     }
     const pic = at.pic, digits = at.digits;
-    // a second look at rows the first reading skipped: the barcodes sit at a regular spacing, so a gap
-    // in the column (or a row just above the first / below the last) is read again, close up
+    // 3. rows the look skipped: the barcodes sit at a regular spacing, so gaps are read again close up
     await fillMissedRows(pic, digits);
-    // 2. the words only around the list: the barcodes' column with the names beside it, and the area
-    //    under it where the till shows how many items there are — not the buttons and panels
-    await loadLabelOCR();
-    const codes = validCodes(digits);
-    let crop = {x: 0, y: 0, w: pic.width, h: pic.height};
-    if (codes.length >= 2) {
-      const x0 = Math.min(...codes.map(d => d.x0)), x1 = Math.max(...codes.map(d => d.x1));
-      const y0 = Math.min(...codes.map(d => d.y0)), y1 = Math.max(...codes.map(d => d.y1));
-      const w = x1 - x0, row = Math.max((y1 - y0) / Math.max(1, codes.length - 1), (codes[0].y1 - codes[0].y0) * 3);
-      const cx0 = Math.max(0, Math.round(x0 - 0.5 * w)), cy0 = Math.max(0, Math.round(y0 - 1.3 * row));
-      const cx1 = Math.min(pic.width, Math.round(x1 + 1.2 * w)), cy1 = Math.min(pic.height, Math.round(y1 + 8 * row));
-      crop = {x: cx0, y: cy0, w: cx1 - cx0, h: cy1 - cy0};
-    }
-    let words = [];
-    if (lblWorker) {
-      const c = document.createElement('canvas'); c.width = crop.w; c.height = crop.h;
-      c.getContext('2d').drawImage(pic, crop.x, crop.y, crop.w, crop.h, 0, 0, crop.w, crop.h);
-      try { const r = await withLabelWorker(w => w.recognize(c, {}, {blocks: true, text: true})); words = toWords(r.data, crop.x, crop.y); } catch(e){}
-    }
-    // 3. put the two readings together: the digits-only reading's long numbers replace whatever the
-    //    word reading made of the same spot, so each code still gets the name written next to it
-    const opts = {w: pic.width};
-    const longD = digits.filter(d => String(d.text).replace(/\D/g, '').length >= 7);
-    const hit = (a, b) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
-    const mixed = words.filter(w => !longD.some(d => hit(w, d) && /\d/.test(w.text))).concat(longD.map(d => ({...d, text: String(d.text)})));
-    let rows = parseScreen(mixed, opts);
-    const drows = parseScreen(digits.map(w => ({...w, text: w.text + ''})), opts);
-    for (const d of drows.filter(d => d.sure || d.partial)) {
-      const near = rows.find(r => Math.abs(r.y - d.y) < 25);
-      if (near && !near.sure && (d.sure || d.code.length > near.code.length)) { near.code = d.code; near.format = d.format; near.sure = d.sure; near.partial = d.partial; near.cut = d.cut; }
-      else if (!near && !rows.some(r => r.code === d.code) && !overWords(d, words)) rows.push({...d, name: ''});
-    }
+    let rows = parseScreen(digits.map(w => ({...w, text: String(w.text)})), {w: pic.width});
     rows.sort((a, b) => a.y - b.y);
     rows = inColumn(rows);
+    // 4. the item count: a small strip under the list, read for "פריטים N"
+    const rc = rows.filter(r => r.x1 > r.x0);
+    if (rc.length) {
+      await loadLabelOCR();
+      if (lblWorker) {
+        const x0 = Math.min(...rc.map(r => r.x0)), x1 = Math.max(...rc.map(r => r.x1)), w = x1 - x0;
+        const yl = Math.max(...rc.map(r => r.y1)), row = rc.length > 1 ? (yl - Math.min(...rc.map(r => r.y0))) / (rc.length - 0.5) : (rc[0].y1 - rc[0].y0) * 4;
+        const bx = Math.max(0, x0 - 0.9 * w), by = Math.min(pic.height, yl + 0.2 * row), bw = pic.width - bx, bh = Math.min(pic.height - by, row * 6);
+        if (bw > 10 && bh > 10) {
+          const c = document.createElement('canvas'); c.width = Math.round(bw); c.height = Math.round(bh);
+          c.getContext('2d').drawImage(pic, bx, by, bw, bh, 0, 0, bw, bh);
+          try { const r = await withLabelWorker(wk => wk.recognize(c, {}, {blocks: true, text: true})); const tc = tillCountOf(toWords(r.data, bx, by)); if (tc) rows.tillCount = tc; } catch(e){}
+        }
+      }
+    }
+    // 5. names from the product list (fast; the same lookup a normal scan uses)
+    await Promise.all(rows.map(r => r.sure ? Promise.race([lookupIL(r.code).then(i => { if (i && i.found && i.name) r.name = (i.name + (i.size && !String(i.name).includes(i.size) ? ' ' + i.size : '')).slice(0, 60); }).catch(() => {}), new Promise(res => setTimeout(res, 2500))]) : null));
     if (rows.length) ctx.deg = at.deg;
-    // a small copy of the (straightened) photo, to show the results on it afterwards
-    try {
-      const colour = at.deg ? rotated(big, at.deg) : big;   // the same straightening, in colour
-      const th = toCanvas(colour, 1000); rows.pic = th; rows.picScale = th.width / pic.width;
-      rows.orig = file;
-    } catch(e){}
+    // a small copy of the straightened photo, to show the results on it afterwards
+    try { const th = toCanvas(pic, 1000); rows.pic = th; rows.picScale = th.width / pic.width; rows.orig = file; } catch(e){}
     return rows;
   }
   async function fillMissedRows(pic, digits){

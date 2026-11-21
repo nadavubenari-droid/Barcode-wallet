@@ -218,6 +218,14 @@
   .film-top{position:absolute;top:calc(env(safe-area-inset-top) + 12px);left:0;right:0;text-align:center;color:#fff;font-weight:700;text-shadow:0 1px 4px #000}
   .film-bar{display:flex;gap:8px;align-items:center;padding:12px 12px calc(env(safe-area-inset-bottom) + 12px);background:#0e0d0b}
   .film-n{flex:1;color:var(--ink);font-weight:700}
+  .film .film-bar{justify-content:space-between}
+  .shutter{width:72px;height:72px;border-radius:50%;border:5px solid #fff;background:#fff;box-shadow:inset 0 0 0 4px #0e0d0b;flex:none}
+  .shutter:active{transform:scale(.92)}
+  .shot-strip{display:flex;gap:6px;overflow-x:auto;padding:6px 12px;background:#0e0d0b;min-height:0}
+  .shot-strip:empty{display:none}
+  .shot-strip img{height:64px;width:auto;border-radius:6px;flex:none;border:1px solid #3a362f}
+  .film.snap video{animation:snap .25s ease-out}
+  @keyframes snap{0%{opacity:.2}100%{opacity:1}}
   .pos-row .n{font:800 15px Inter;text-align:center}
   .pos-row input,.pos-row select{width:100%;padding:8px 9px;border:1px solid var(--line);border-radius:9px;background:#0e0d0b;color:var(--ink);font-size:15px}
   .pos-row .code{grid-column:2/3;font-family:"JetBrains Mono",monospace;letter-spacing:.04em}
@@ -1384,11 +1392,11 @@
     openSheet('<h2>Cashier screen</h2>' +
       '<p class="pos-note">Photograph the list of products on the till screen, top to bottom. If it doesn’t fit in one photo, take more, each one overlapping the last by a row or two — or film it, scrolling slowly. Repeats are removed automatically. Keep the whole width of the screen in view, straight on, without glare.</p>' +
       '<div class="pos-thumbs"></div>' +
-      '<div class="row"><button class="btn" data-act="cam">📷 Take a photo</button><button class="btn" data-act="pick">🖼 Choose photos</button></div>' +
+      '<div class="row"><button class="btn" data-act="cam">📷 Take photos</button><button class="btn" data-act="pick">🖼 Choose photos</button></div>' +
       '<div class="row" style="margin-top:8px"><button class="btn" data-act="film">🎥 Film the screen</button><button class="btn" data-act="vid">🎞 Choose a video</button></div>' +
       '<div class="col" style="margin-top:10px"><button class="btn primary" data-act="read">Read the list</button><button class="btn ghost" data-act="cancel">Cancel</button></div>',
       {
-        cam: () => $('#posCam').click(), pick: () => $('#posPick').click(),
+        cam: () => shootScreen(), pick: () => $('#posPick').click(),
         film: () => filmScreen(), vid: () => $('#posVid').click(),
         read: () => { if (!posFiles.length) { toast('Add a photo first'); return; } readScreens(posFiles.slice()); },
         cancel: () => { posFiles = []; closeSheet(); }
@@ -1408,6 +1416,53 @@
     });
   }
   $('#posBtn').addEventListener('click', () => { posFiles = []; posSheet(); });
+
+  /* ----- taking several photos of the till screen in a row: the camera stays open, tap the
+     shutter, scroll the till, tap again… then Done ----- */
+  async function shootScreen(){
+    closeSheet();
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({audio: false, video: {facingMode: {ideal: 'environment'}, width: {ideal: 3840}, height: {ideal: 2160}}});
+    } catch(e){ $('#posCam').click(); return; }   // no live camera here: fall back to the phone's own camera, one photo at a time
+    const box = document.createElement('div'); box.className = 'film';
+    box.innerHTML = '<video playsinline muted autoplay></video>' +
+      '<div class="film-top">Take a photo, scroll the till, take the next one</div>' +
+      '<div class="shot-strip"></div>' +
+      '<div class="film-bar"><button class="btn ghost" type="button" data-k="cancel">Cancel</button>' +
+      '<button class="shutter" type="button" aria-label="Take photo"></button>' +
+      '<button class="btn primary" type="button" data-k="done">Done</button></div>';
+    document.body.append(box); document.body.classList.add('lock');
+    const v = box.querySelector('video'); v.srcObject = stream;
+    const strip = box.querySelector('.shot-strip'), doneBtn = box.querySelector('[data-k="done"]');
+    let cap = null;
+    try { const tr = stream.getVideoTracks()[0]; if (window.ImageCapture) cap = new ImageCapture(tr); } catch(e){}
+    const count = () => { doneBtn.textContent = posFiles.length ? 'Done (' + posFiles.length + ')' : 'Done'; };
+    const addThumb = blob => { const i = document.createElement('img'); i.alt = ''; i.src = URL.createObjectURL(blob); strip.append(i); strip.scrollLeft = strip.scrollWidth; };
+    posFiles.forEach(addThumb); count();
+    const stop = () => { stream.getTracks().forEach(t => t.stop()); box.remove(); document.body.classList.remove('lock'); };
+    let shooting = false;
+    box.querySelector('.shutter').onclick = async () => {
+      if (shooting || v.readyState < 2) return;
+      shooting = true;
+      box.classList.remove('snap'); void box.offsetWidth; box.classList.add('snap');
+      try { beep('ok'); } catch(e){}
+      let blob = null;
+      try { if (cap) blob = await cap.takePhoto(); } catch(e){ blob = null; }   // full camera resolution where the phone allows
+      if (!blob) {
+        const c = toCanvas(v, 4000);
+        blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.92));
+      }
+      if (blob) { posFiles.push(blob); addThumb(blob); count(); }
+      shooting = false;
+    };
+    box.querySelector('[data-k="cancel"]').onclick = () => { stop(); posSheet(); };
+    doneBtn.onclick = () => {
+      stop();
+      if (!posFiles.length) { posSheet(); return; }
+      readScreens(posFiles.slice());
+    };
+  }
   $('#posVid').addEventListener('change', e => {
     const f = e.target.files && e.target.files[0]; e.target.value = '';
     if (f) framesFromVideo(f);

@@ -1197,9 +1197,18 @@
       l.x0 = Math.min(...l.w.map(w => w.x0)); l.x1 = Math.max(...l.w.map(w => w.x1));
       // the long number on the line (digits split by spaces are joined back)
       let best = null, run = [], runX = 0, runX1 = 0;
+      const take = (d, x, x1, y) => { if (d.length >= 7 && d.length <= 14 && (!best || d.length > best.d.length)) best = {d: d, x: x, x1: x1, y: y}; };
       const flush = () => {
-        const d = run.join('');
-        if (d.length >= 7 && d.length <= 14 && (!best || d.length > best.d.length)) best = {d: d, x: runX, x1: runX1};
+        const d = run.map(r => r.t).join('');
+        const ry = run.length ? run.reduce((t, r) => t + r.y, 0) / run.length : 0;
+        if (d.length <= 14) take(d, runX, runX1, ry);
+        else {
+          // too long: a barcode run together with a stray number beside it (a quantity, a mark)
+          let found = false;
+          // (not in a very long number, or one ending in a year: that's the header's version and date)
+          if (d.length <= 17 && !/20[2-3]\d$/.test(d)) for (let a = 0; a + 13 <= d.length && !found; a++) if (gtinOk(d.substr(a, 13))) { take(d.substr(a, 13), runX, runX1, ry); found = true; }
+          if (!found) run.forEach(r => take(r.t, r.x0, r.x1, r.y));
+        }
         run = [];
       };
       for (const w of l.w) {
@@ -1209,7 +1218,7 @@
         if (t && /^[\d\s\-–]+$/.test(core) && (core === w.text || t.length >= 6)) {
           // a wide gap means a different number (another column), not the rest of this one
           if (run.length && w.x0 - runX1 > Math.max(2, (w.y1 - w.y0)) * 1.6) flush();
-          if (!run.length) runX = w.x0; runX1 = w.x1; run.push(t);
+          if (!run.length) runX = w.x0; runX1 = w.x1; run.push({t: t, x0: w.x0, x1: w.x1, y: (w.y0 + w.y1) / 2});
         } else { flush(); }
       }
       flush();
@@ -1219,6 +1228,7 @@
       l.code = best ? best.d : '';
       l.codeX = best ? best.x : 0;
       l.codeX1 = best ? best.x1 : 0;
+      l.codeY = best && best.y ? best.y : l.cy;   // where the number itself stands (a line can lean)
       // the number runs into the edge of the photo: probably cut off
       l.cut = !!(best && picW && best.x1 > picW * 0.95);
       l.letters = (l.text.replace(/[\d\s.,₪$€%:\-–|/\\()[\]"'״׳*+=~_]/g, '')).length;
@@ -1243,7 +1253,9 @@
     const colTol = medH * 3;
     // everything else counts only when it lines up with the real barcodes (same column); it is kept
     // but marked, so it can be checked in the review
-    cands = cands.filter(l => l.fix || l.partial || (sureXs.length ? sureXs.some(x => Math.abs(x - l.codeX) < colTol) : !couponScreen && cands.length >= 2 && l.code.length <= 10));
+    // (or its box spans the middle of the barcode column — the reader's boxes are sometimes too wide)
+    const sureMids = cands.filter(l => l.fix).map(l => (l.codeX + l.codeX1) / 2).sort((p, q) => p - q), colMid = sureMids[sureMids.length >> 1];
+    cands = cands.filter(l => l.fix || l.partial || (sureXs.length ? sureXs.some(x => Math.abs(x - l.codeX) < colTol) || (l.codeX < colMid && l.codeX1 > colMid && l.code.length >= 12) : !couponScreen && cands.length >= 2 && l.code.length <= 10));
     // a date in the header (11.08.2026 read as 11082026) is not a product
     cands = cands.filter(l => !/(?:0?[1-9]|[12]\d|3[01])(?:0[1-9]|1[0-2])20\d\d/.test(l.code) || (l.fix && l.fix.sure && l.code.length >= 12 && !/^0?\d{1,2}\d{2}20\d\d$/.test(l.code)));
     // the barcodes of a till's list stand in one column: a number far from it (prices run together,
@@ -1284,6 +1296,18 @@
     }
     const med = a => { const b = a.slice().sort((x, y) => x - y); return b.length ? b[b.length >> 1] : Infinity; };
     const nameAbove = gapsAbove.length >= 2 && med(gapsAbove) < med(gapsBelow) * 0.97;
+    // a code that passed the check but appears once, a digit or two away from a code that appears
+    // several times on the same screen: that same product, misread (two real barcodes can't differ in one digit)
+    {
+      const cnt = new Map();
+      cands.forEach(l => { if (l.fix && l.fix.sure) cnt.set(l.fix.code, (cnt.get(l.fix.code) || 0) + 1); });
+      for (const l of cands) {
+        if (!(l.fix && l.fix.sure) || cnt.get(l.fix.code) !== 1) continue;
+        const c = l.fix.code;
+        const often = [...cnt.keys()].find(o => cnt.get(o) >= 2 && o.length === c.length && [...o].filter((ch, i) => ch !== c[i]).length <= 2);
+        if (often) l.fix = {code: often, sure: true, derived: true};
+      }
+    }
     const out = [];
     for (const l of cands) {
       const i = sig.indexOf(l);
@@ -1327,7 +1351,7 @@
       }
       name = name.replace(/(?:^|\s)(?:x|×)\s?\d{1,2}\b|\b\d{1,2}\s?(?:x|×|יח['׳]?)(?=\s|$)|כמות[:\s]*\d{1,2}|(?:^|\s)-?\d{1,4}[.,]\d{1,2}(?=\s|$)/gi, ' ').replace(/\s{2,}/g, ' ').trim();
       const code = l.fix ? l.fix.code : l.code;
-      out.push({code: code, format: formatFor(code), name: name.slice(0, 60), qty: qty, sure: !!(l.fix && l.fix.sure), fixed: !!(l.fix && l.fix.fixed), partial: !!l.partial && !(l.fix && l.fix.sure), cut: !!l.cut, derived: !!(l.fix && l.fix.derived), y: l.cy, x0: l.codeX, x1: l.codeX1, y0: l.cy - medH * 0.7, y1: l.cy + medH * 0.7});
+      out.push({code: code, format: formatFor(code), name: name.slice(0, 60), qty: qty, sure: !!(l.fix && l.fix.sure), fixed: !!(l.fix && l.fix.fixed), partial: !!l.partial && !(l.fix && l.fix.sure), cut: !!l.cut, derived: !!(l.fix && l.fix.derived), y: l.codeY, x0: l.codeX, x1: l.codeX1, y0: l.codeY - medH * 0.7, y1: l.codeY + medH * 0.7});
     }
     // many tills show how many items are on the bill ("פריטים 10"): used to check the count
     const tc = tillCountOf(ws); if (tc) out.tillCount = tc;

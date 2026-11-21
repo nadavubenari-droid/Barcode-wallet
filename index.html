@@ -1541,7 +1541,7 @@
   }
 
   /* ---------- reel mode ---------- */
-  const REEL_MS = 1500, BLANK_MS = 1000;
+  const REEL_MS = 1000, BLANK_MS = 1000;
   const REPEAT_SCALES = [1, 0.8, 0.92, 0.72, 0.86];   // 1st, 2nd, 3rd… showing of the same barcode
   let reelT = null, reelIdx = -1, reelPaused = false, reelDone = false, reelSlides = [], reelTotal = 0, wakeLock = null;
   function keepAwake(){

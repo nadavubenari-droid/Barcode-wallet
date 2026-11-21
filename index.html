@@ -1562,8 +1562,8 @@
     }
     list.forEach((it, i) => {
       const key = it.format + '|' + it.value;
-      const prev = list[i - 1];
-      if (prev && it.value && prev.value === it.value && prev.format === it.format) {
+      // a blank pause between every two barcodes, so the till treats each one as a new scan
+      if (i > 0) {
         const blank = document.createElement('div');
         blank.className = 'slide blank';
         stage.append(blank);

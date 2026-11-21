@@ -1385,50 +1385,83 @@
     else { try { img = await loadImage(file); } catch(e){ return []; } }
     const base = toCanvas(img, 2000);
     const big = base.width < 1400 ? upscale(base, 1800) : base;
-    await loadLabelOCR(); await loadOCR();
-    const toWords = data => wordsOf(data || {}).filter(w => w && w.bbox).map(w => ({text: w.text, conf: w.confidence, x0: w.bbox.x0, y0: w.bbox.y0, x1: w.bbox.x1, y1: w.bbox.y1}));
-    let best = [];
-    // the angle: the one found in the last picture of the same film, or a quick look —
-    // straight and slightly tilted first, sideways / upside down only if nothing showed
-    let degs = [0];
-    if (ocrWorker) {
-      if (ctx.deg != null) degs = [ctx.deg];
-      else {
-        let a = await screenAngle(big, [0, 5, -5, 9, -9]);
-        if (a.score <= 0) a = await screenAngle(big, [180, 90, -90]);
-        degs = [a.score > 0 ? a.deg : 0];
-      }
-    }
-    for (const deg of degs) {
+    await loadOCR();
+    const toWords = (data, ox, oy) => wordsOf(data || {}).filter(w => w && w.bbox).map(w => ({text: w.text, conf: w.confidence, x0: w.bbox.x0 + (ox || 0), y0: w.bbox.y0 + (oy || 0), x1: w.bbox.x1 + (ox || 0), y1: w.bbox.y1 + (oy || 0)}));
+    const validCodes = ds => ds.filter(d => { const c = String(d.text).replace(/\D/g, ''); return (c.length === 13 || c.length === 12 || c.length === 8) && gtinOk(c); });
+    // 1. the numbers first (fast): straight, or the angle remembered from the last picture of a film;
+    //    other angles only when that doesn't show barcodes
+    const digitsAt = async deg => {
       const pic = enhance(deg ? rotated(big, deg) : big, 0.4);
-      let words = [], digits = [];
-      // the word reading and the number reading run side by side
-      await Promise.all([
-        lblWorker ? withLabelWorker(w => w.recognize(pic, {}, {blocks: true, text: true})).then(r => { words = toWords(r.data); }).catch(() => {}) : null,
-        ocrWorker ? ocrWorker.recognize(pic, {}, {blocks: true, text: true}).then(r => { digits = toWords(r.data); }).catch(() => {}) : null
-      ]);
-      const opts = {w: pic.width};
-      // the digits-only reading is better at numbers: its long numbers replace whatever the word
-      // reading made of the same spot, so each code still gets the name written next to it
-      const longD = digits.filter(d => String(d.text).replace(/\D/g, '').length >= 7);
-      const hit = (a, b) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
-      const mixed = words.filter(w => !longD.some(d => hit(w, d) && /\d/.test(w.text))).concat(longD.map(d => ({...d, text: String(d.text)})));
-      let rows = parseScreen(mixed, opts);
-      const drows = parseScreen(digits.map(w => ({...w, text: w.text + ''})), opts);
-      for (const d of drows.filter(d => d.sure || d.partial)) {
-        const near = rows.find(r => Math.abs(r.y - d.y) < 25);
-        if (near && !near.sure && (d.sure || d.code.length > near.code.length)) { near.code = d.code; near.format = d.format; near.sure = d.sure; near.partial = d.partial; near.cut = d.cut; }
-        else if (!near && !rows.some(r => r.code === d.code) && !overWords(d, words)) rows.push({...d, name: ''});
-      }
-      rows.sort((a, b) => a.y - b.y);
-      rows = inColumn(rows);
-      const score = rs => rs.filter(r => r.sure).length * 2 + rs.filter(r => r.partial).length;
-      if (score(rows) > score(best) || (!best.length && rows.length)) best = rows;
-      if (rows.length) ctx.deg = deg;
+      let ds = [];
+      try { const r = await ocrWorker.recognize(pic, {}, {blocks: true, text: true}); ds = toWords(r.data); } catch(e){}
+      return {deg: deg, pic: pic, digits: ds};
+    };
+    if (!ocrWorker) return [];
+    let at = await digitsAt(ctx.deg != null ? ctx.deg : 0);
+    if (validCodes(at.digits).length < 2) {
+      let a = await screenAngle(big, [5, -5, 9, -9].filter(d => d !== at.deg));
+      if (a.score <= 0) a = await screenAngle(big, [180, 90, -90]);
+      if (a.score > 0 && a.deg !== at.deg) { const b = await digitsAt(a.deg); if (validCodes(b.digits).length > validCodes(at.digits).length) at = b; }
     }
-    // a remembered angle that found nothing this time: look again
-    if (!best.length && ctx.deg != null && degs.length === 1 && !ctx.retry) { ctx.deg = null; ctx.retry = true; best = await readScreenPhoto(file, ctx); ctx.retry = false; }
-    return best;
+    // straighten by the barcodes themselves: they stand in one column, so its slant is the photo's tilt
+    {
+      const cs = validCodes(at.digits);
+      if (cs.length >= 3) {
+        const ys = cs.map(d => (d.y0 + d.y1) / 2), xs = cs.map(d => d.x0);
+        const my = ys.reduce((t, v) => t + v, 0) / ys.length, mx = xs.reduce((t, v) => t + v, 0) / xs.length;
+        let num = 0, den = 0;
+        ys.forEach((y, k) => { num += (y - my) * (xs[k] - mx); den += (y - my) * (y - my); });
+        const tilt = den ? Math.atan(num / den) * 180 / Math.PI : 0;
+        if (Math.abs(tilt) > 0.8 && Math.abs(tilt) < 15) {
+          const b = await digitsAt(at.deg + tilt);
+          if (validCodes(b.digits).length >= cs.length) at = b;
+        }
+      }
+    }
+    const pic = at.pic, digits = at.digits;
+    // 2. the words only around the list: the barcodes' column with the names beside it, and the area
+    //    under it where the till shows how many items there are — not the buttons and panels
+    await loadLabelOCR();
+    const codes = validCodes(digits);
+    let crop = {x: 0, y: 0, w: pic.width, h: pic.height};
+    if (codes.length >= 2) {
+      const x0 = Math.min(...codes.map(d => d.x0)), x1 = Math.max(...codes.map(d => d.x1));
+      const y0 = Math.min(...codes.map(d => d.y0)), y1 = Math.max(...codes.map(d => d.y1));
+      const w = x1 - x0, row = Math.max((y1 - y0) / Math.max(1, codes.length - 1), (codes[0].y1 - codes[0].y0) * 3);
+      const cx0 = Math.max(0, Math.round(x0 - 0.5 * w)), cy0 = Math.max(0, Math.round(y0 - 1.3 * row));
+      const cx1 = Math.min(pic.width, Math.round(x1 + 1.2 * w)), cy1 = Math.min(pic.height, Math.round(y1 + 8 * row));
+      crop = {x: cx0, y: cy0, w: cx1 - cx0, h: cy1 - cy0};
+    }
+    let words = [];
+    if (lblWorker) {
+      const c = document.createElement('canvas'); c.width = crop.w; c.height = crop.h;
+      c.getContext('2d').drawImage(pic, crop.x, crop.y, crop.w, crop.h, 0, 0, crop.w, crop.h);
+      try { const r = await withLabelWorker(w => w.recognize(c, {}, {blocks: true, text: true})); words = toWords(r.data, crop.x, crop.y); } catch(e){}
+    }
+    // 3. put the two readings together: the digits-only reading's long numbers replace whatever the
+    //    word reading made of the same spot, so each code still gets the name written next to it
+    const opts = {w: pic.width};
+    const longD = digits.filter(d => String(d.text).replace(/\D/g, '').length >= 7);
+    const hit = (a, b) => a.x0 < b.x1 && b.x0 < a.x1 && a.y0 < b.y1 && b.y0 < a.y1;
+    const mixed = words.filter(w => !longD.some(d => hit(w, d) && /\d/.test(w.text))).concat(longD.map(d => ({...d, text: String(d.text)})));
+    let rows = parseScreen(mixed, opts);
+    const drows = parseScreen(digits.map(w => ({...w, text: w.text + ''})), opts);
+    for (const d of drows.filter(d => d.sure || d.partial)) {
+      const near = rows.find(r => Math.abs(r.y - d.y) < 25);
+      if (near && !near.sure && (d.sure || d.code.length > near.code.length)) { near.code = d.code; near.format = d.format; near.sure = d.sure; near.partial = d.partial; near.cut = d.cut; }
+      else if (!near && !rows.some(r => r.code === d.code) && !overWords(d, words)) rows.push({...d, name: ''});
+    }
+    rows.sort((a, b) => a.y - b.y);
+    rows = inColumn(rows);
+    if (rows.length) ctx.deg = at.deg;
+    return rows;
+  }
+  // photos are read as soon as they're taken or chosen, in the background, so the list is
+  // mostly ready by the time "Done" is pressed
+  const screenReads = new Map();
+  function readScreenSoon(file){
+    if (!screenReads.has(file)) screenReads.set(file, readScreenPhoto(file).catch(() => []));
+    return screenReads.get(file);
   }
   // a number cut off at the photo's edge: the missing digits come from the product list —
   // the Israeli codes that start the same way, picked by the name on the screen
@@ -1480,10 +1513,15 @@
       const files = e.target.files ? [...e.target.files] : [];
       e.target.value = '';
       posFiles = posFiles.concat(files);
+      files.forEach(f => readScreenSoon(f));
       posSheet();
     });
   }
-  $('#posBtn').addEventListener('click', () => { posFiles = []; posSheet(); });
+  $('#posBtn').addEventListener('click', () => {
+    posFiles = []; screenReads.clear();
+    loadOCR(); loadLabelOCR();   // get the readers ready while the photos are being taken
+    posSheet();
+  });
 
   /* ----- taking several photos of the till screen in a row: the camera stays open, tap the
      shutter, scroll the till, tap again… then Done ----- */
@@ -1521,7 +1559,7 @@
         const c = toCanvas(v, 4000);
         blob = await new Promise(res => c.toBlob(res, 'image/jpeg', 0.92));
       }
-      if (blob) { posFiles.push(blob); addThumb(blob); count(); }
+      if (blob) { posFiles.push(blob); addThumb(blob); count(); readScreenSoon(blob); }
       shooting = false;
     };
     box.querySelector('[data-k="cancel"]').onclick = () => { stop(); posSheet(); };
@@ -1543,7 +1581,7 @@
       openSheet('<div class="working"><div class="spinner"></div><p></p></div>', null,
         el => el.querySelector('p').textContent = 'Reading ' + word + ' ' + (i + 1) + ' of ' + files.length + '…' + (i === 0 ? ' (the first time takes longer)' : ''));
       await tick();
-      const rows = await readScreenPhoto(files[i], word === 'photo' ? {} : film);
+      const rows = word === 'photo' ? await readScreenSoon(files[i]) : await readScreenPhoto(files[i], film);
       if (rows.tillCount) tillCount = Math.max(tillCount, rows.tillCount);
       if (rows.some(r => r.cut)) cut = true;
       if (!rows.length) { misses++; if (word === 'photo') notes.push('Photo ' + (i + 1) + ': no products found'); continue; }

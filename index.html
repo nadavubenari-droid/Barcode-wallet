@@ -214,6 +214,12 @@
   .pos-row{display:grid;grid-template-columns:28px 1fr auto;gap:6px 8px;align-items:center;background:#151412;border:1px solid var(--line);border-radius:12px;padding:8px}
   .pos-row.doubt{border-color:#7a5a12}
   .film{position:fixed;inset:0;z-index:60;background:#000;display:flex;flex-direction:column}
+  .till-btn{width:100%;margin:-4px 0 14px}
+  .seg{display:flex;background:var(--card,#1a1814);border:1px solid #3a362f;border-radius:12px;padding:3px;margin:0 0 12px}
+  .seg button{flex:1;border:0;background:transparent;color:inherit;font:600 15px system-ui,sans-serif;padding:9px;border-radius:9px}
+  .seg button.on{background:#f2ede4;color:#0e0d0b}
+  .till-pics{display:flex;flex-direction:column;gap:10px;margin-bottom:12px}
+  .till-pics img{width:100%;border-radius:12px;display:block}
   .pos-row.flash{animation:rowflash 1.2s ease-out}
   @keyframes rowflash{0%{box-shadow:0 0 0 3px #3ddc84}100%{box-shadow:0 0 0 0 transparent}}
   .pos-shots{display:flex;gap:10px;overflow-x:auto;scroll-snap-type:x mandatory;margin:4px -4px 14px;padding:0 4px}
@@ -343,6 +349,7 @@
       <button class="btn reel-btn half" id="fvReel" type="button"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.5v13l10.5-6.5z"/></svg>Reel mode</button>
       <button class="btn primary half" id="fvScan" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>Scan more</button>
     </div>
+    <button class="btn till-btn" id="fvTill" type="button" hidden>🧾 Till photos</button>
     <div id="fvList" class="grid"></div>
     <button class="btn danger fv-del" id="fvDelete" type="button">Delete this folder</button>
   </div>
@@ -679,6 +686,7 @@
     window.scrollTo(0, 0);
     drawFolder();
   }
+  $('#fvTill').addEventListener('click', () => { if (openFolder !== null) showTillPhotos(openFolder); });
   function closeFolderView(){
     openFolder = null;
     $('#folderView').hidden = true; $('#home').hidden = false;
@@ -688,6 +696,7 @@
     if (!f) { closeFolderView(); return; }
     $('#fvTitle').textContent = folderName(f.first);
     $('#fvSub').textContent = plural(f.items.length) + ', in the order you scanned them';
+    $('#fvTill').hidden = !tillSids.has(String(f.id));
     const l = $('#fvList'); l.textContent = '';
     f.items.forEach((it, idx) => {
       l.append(tileCard(it, idx + 1));
@@ -739,6 +748,7 @@
       {del: async () => {
         closeSheet(); closeFolderView();
         for (const it of f.items) await deleteItem(it);
+        dropOldTillPhotos();
         toast('Folder deleted');
       }},
       el => el.querySelector('.m').textContent = 'All ' + plural(f.items.length) + ' from ' + folderName(f.first) + " will be deleted. This can't be undone.");
@@ -1464,7 +1474,11 @@
     rows = inColumn(rows);
     if (rows.length) ctx.deg = at.deg;
     // a small copy of the (straightened) photo, to show the results on it afterwards
-    try { const th = toCanvas(pic, 1000); rows.pic = th; rows.picScale = th.width / pic.width; } catch(e){}
+    try {
+      const colour = at.deg ? rotated(big, at.deg) : big;   // the same straightening, in colour
+      const th = toCanvas(colour, 1000); rows.pic = th; rows.picScale = th.width / pic.width;
+      rows.orig = file;
+    } catch(e){}
     return rows;
   }
   async function fillMissedRows(pic, digits){
@@ -1513,6 +1527,56 @@
   function readScreenSoon(file){
     if (!screenReads.has(file)) screenReads.set(file, readScreenPhoto(file).catch(() => []));
     return screenReads.get(file);
+  }
+  /* ----- the till photos kept with a folder (originals in colour, and numbered) ----- */
+  const toJpeg = (c, q) => new Promise(res => c.toBlob(res, 'image/jpeg', q || 0.85));
+  async function saveTillPhotos(sid, shots, marked){
+    const out = [];
+    for (const sh of shots) {
+      try {
+        let src = sh.orig;
+        if (!(src instanceof HTMLCanvasElement)) src = await loadImage(src);
+        const orig = await toJpeg(toCanvas(src, 1800), 0.85);
+        const mk = await toJpeg(marked(sh), 0.85);
+        if (orig && mk) out.push({orig: orig, marked: mk});
+      } catch(e){}
+    }
+    if (!out.length) return;
+    try { await idbPut('till-' + sid, out); tillSids.add(String(sid)); saveTillSids(); if (String(openFolder) === String(sid)) drawFolder(); } catch(e){}
+  }
+  const tillSids = new Set((() => { try { return JSON.parse(localStorage.getItem('barcode-wallet-till') || '[]'); } catch(e){ return []; } })());
+  const saveTillSids = () => { try { localStorage.setItem('barcode-wallet-till', JSON.stringify([...tillSids])); } catch(e){} };
+  // photos of folders that no longer exist (deleted, or older than a week) are let go too
+  async function dropOldTillPhotos(){
+    const live = new Set(folders().map(f => String(f.id)));
+    for (const sid of [...tillSids]) if (!live.has(sid)) {
+      tillSids.delete(sid);
+      try { const db = await dataDB(); db.transaction('kv', 'readwrite').objectStore('kv').delete('till-' + sid); } catch(e){}
+    }
+    saveTillSids();
+  }
+  async function showTillPhotos(sid){
+    let list = null;
+    try { list = await idbGet('till-' + sid); } catch(e){}
+    if (!list || !list.length) { toast('The photos aren’t on this phone anymore'); return; }
+    const urls = list.map(p => ({orig: URL.createObjectURL(p.orig), marked: URL.createObjectURL(p.marked)}));
+    let mode = 'marked';
+    openSheet('<h2>Till photos</h2><div class="seg"><button type="button" data-m="marked">Numbered</button><button type="button" data-m="orig">Original</button></div><div class="till-pics"></div>' +
+      '<div class="col"><button class="btn ghost" data-act="close">Close</button></div>',
+      {close: () => { closeSheet(); urls.forEach(u => { URL.revokeObjectURL(u.orig); URL.revokeObjectURL(u.marked); }); }},
+      el => {
+        const draw = () => {
+          el.querySelectorAll('.seg button').forEach(b => b.classList.toggle('on', b.dataset.m === mode));
+          const box = el.querySelector('.till-pics'); box.textContent = '';
+          urls.forEach((u, i) => {
+            const a = document.createElement('a'); a.href = u[mode]; a.target = '_blank'; a.rel = 'noopener';   // tap: full size, to zoom
+            const im = document.createElement('img'); im.alt = 'Photo ' + (i + 1); im.src = u[mode];
+            a.append(im); box.append(a);
+          });
+        };
+        el.querySelectorAll('.seg button').forEach(b => b.onclick = () => { mode = b.dataset.m; draw(); });
+        draw();
+      });
   }
   // a number cut off at the photo's edge: the missing digits come from the product list —
   // the Israeli codes that start the same way, picked by the name on the screen
@@ -1635,7 +1699,7 @@
       await tick();
       const rows = word === 'photo' ? await readScreenSoon(files[i]) : await readScreenPhoto(files[i], film);
       if (rows.tillCount) tillCount = Math.max(tillCount, rows.tillCount);
-      if (rows.pic && rows.length) shots.push({pic: rows.pic, scale: rows.picScale || 1, rows: rows.slice()});
+      if (rows.pic) shots.push({pic: rows.pic, scale: rows.picScale || 1, rows: rows.slice(), orig: rows.orig});
       if (rows.some(r => r.cut)) cut = true;
       if (!rows.length) { misses++; if (word === 'photo') notes.push('Photo ' + (i + 1) + ': no products found'); continue; }
       const st = stitchLists(list, rows);
@@ -1712,44 +1776,51 @@
     const rows = list.map(r => ({...r, src: r}));
     // the results drawn on the photos: each product found, boxed and numbered in list order
     const finalOf = r => { let k = r, g = 0; while (k.final && k.final !== k && g++ < 20) k = k.final; return k; };
+    // one photo with the products boxed and numbered; crop: only the list part (for checking on screen)
+    const markShot = (sh, crop, label) => {
+      const rs = sh.rows.filter(r => r.x1 > r.x0), S = sh.scale;
+      let ox = 0, oy = 0, cw = sh.pic.width, ch = sh.pic.height;
+      if (crop && rs.length) {
+        const x0 = Math.min(...rs.map(r => r.x0)) * S, x1 = Math.max(...rs.map(r => r.x1)) * S;
+        const y0 = Math.min(...rs.map(r => r.y0)) * S, y1 = Math.max(...rs.map(r => r.y1)) * S;
+        const w = x1 - x0, row = rs.length > 1 ? (y1 - y0) / (rs.length - 1) : (y1 - y0) * 3;
+        ox = Math.max(0, x0 - 1.7 * w); oy = Math.max(0, y0 - 1.6 * row);
+        cw = Math.min(sh.pic.width, x1 + 0.45 * w) - ox; ch = Math.min(sh.pic.height, y1 + 1.2 * row) - oy;
+      }
+      const c = document.createElement('canvas'); c.width = Math.round(cw); c.height = Math.round(ch);
+      const x = c.getContext('2d');
+      x.drawImage(sh.pic, ox, oy, cw, ch, 0, 0, cw, ch);
+      x.translate(-ox, -oy);
+      x.fillStyle = 'rgba(0,0,0,.18)'; x.fillRect(ox, oy, cw, ch);   // dim the photo a little so the marks stand out
+      const u = Math.max(1.2, (crop ? cw : Math.min(cw, 700)) / 300);
+      sh.rows.forEach(pr => {
+        const n = rows.findIndex(r => r.src === finalOf(pr)) + 1;
+        const bx = pr.x0 * S - 4 * u, by = pr.y0 * S - 2 * u, bw = (pr.x1 - pr.x0) * S + 8 * u, bh = (pr.y1 - pr.y0) * S + 4 * u;
+        if (!(bw > 0 && bh > 0)) return;
+        const doubt = n && !rows[n - 1].sure;
+        const col = !n ? 'rgba(160,160,160,.9)' : doubt ? '#f2b33d' : '#3ddc84';
+        x.lineWidth = 1.5 * u; x.strokeStyle = col;
+        if (!n) x.setLineDash([3 * u, 2 * u]); else x.setLineDash([]);
+        x.fillStyle = !n ? 'rgba(160,160,160,.12)' : doubt ? 'rgba(242,179,61,.18)' : 'rgba(61,220,132,.18)';
+        x.beginPath(); x.roundRect ? x.roundRect(bx, by, bw, bh, 3 * u) : x.rect(bx, by, bw, bh); x.fill(); x.stroke();
+        x.setLineDash([]);
+        if (!n) return;   // removed from the list
+        const text = label ? label(n) : String(n);
+        const r = Math.max(9 * u, bh * 0.55), cx = bx - r - 2 * u, cy = by + bh / 2;
+        x.font = '800 ' + Math.round(r * 1.15) + 'px system-ui,sans-serif';
+        const tw = x.measureText(text).width, pw = Math.max(r * 2, tw + r * 0.9);
+        x.beginPath(); x.roundRect ? x.roundRect(cx + r - pw, cy - r, pw, r * 2, r) : x.arc(cx, cy, r, 0, Math.PI * 2); x.fillStyle = col; x.fill();
+        x.lineWidth = 1 * u; x.strokeStyle = 'rgba(0,0,0,.35)'; x.stroke();
+        x.fillStyle = '#0e0d0b'; x.textAlign = 'center'; x.textBaseline = 'middle';
+        x.fillText(text, cx + r - pw / 2, cy + r * 0.05);
+      });
+      return {c: c, ox: ox, oy: oy, u: u};
+    };
     const drawShots = el => {
       const box = el.querySelector('.pos-shots'); if (!box) return;
       box.textContent = '';
-      shots.forEach(sh => {
-        // show just the list part of the photo, so the numbers are big enough to check
-        const rs = sh.rows.filter(r => r.x1 > r.x0), S = sh.scale;
-        let ox = 0, oy = 0, cw = sh.pic.width, ch = sh.pic.height;
-        if (rs.length) {
-          const x0 = Math.min(...rs.map(r => r.x0)) * S, x1 = Math.max(...rs.map(r => r.x1)) * S;
-          const y0 = Math.min(...rs.map(r => r.y0)) * S, y1 = Math.max(...rs.map(r => r.y1)) * S;
-          const w = x1 - x0, row = rs.length > 1 ? (y1 - y0) / (rs.length - 1) : (y1 - y0) * 3;
-          ox = Math.max(0, x0 - 1.7 * w); oy = Math.max(0, y0 - 1.6 * row);
-          cw = Math.min(sh.pic.width, x1 + 0.45 * w) - ox; ch = Math.min(sh.pic.height, y1 + 1.2 * row) - oy;
-        }
-        const c = document.createElement('canvas'); c.width = Math.round(cw); c.height = Math.round(ch);
-        const x = c.getContext('2d');
-        x.drawImage(sh.pic, ox, oy, cw, ch, 0, 0, cw, ch);
-        x.translate(-ox, -oy);
-        x.fillStyle = 'rgba(0,0,0,.18)'; x.fillRect(ox, oy, cw, ch);   // dim the photo a little so the marks stand out
-        const u = Math.max(1.2, cw / 300);
-        sh.rows.forEach(pr => {
-          const n = rows.findIndex(r => r.src === finalOf(pr)) + 1;
-          const bx = pr.x0 * sh.scale - 4 * u, by = pr.y0 * sh.scale - 2 * u, bw = (pr.x1 - pr.x0) * sh.scale + 8 * u, bh = (pr.y1 - pr.y0) * sh.scale + 4 * u;
-          if (!(bw > 0 && bh > 0)) return;
-          const doubt = n && !rows[n - 1].sure;
-          const col = !n ? 'rgba(160,160,160,.9)' : doubt ? '#f2b33d' : '#3ddc84';
-          x.lineWidth = 1.5 * u; x.strokeStyle = col;
-          if (!n) x.setLineDash([3 * u, 2 * u]); else x.setLineDash([]);
-          x.fillStyle = !n ? 'rgba(160,160,160,.12)' : doubt ? 'rgba(242,179,61,.18)' : 'rgba(61,220,132,.18)';
-          x.beginPath(); x.roundRect ? x.roundRect(bx, by, bw, bh, 3 * u) : x.rect(bx, by, bw, bh); x.fill(); x.stroke();
-          x.setLineDash([]);
-          if (!n) return;   // removed from the list
-          const r = Math.max(9 * u, bh * 0.55), cx = bx - r - 2 * u, cy = by + bh / 2;
-          x.beginPath(); x.arc(cx, cy, r, 0, Math.PI * 2); x.fillStyle = col; x.fill();
-          x.lineWidth = 1 * u; x.strokeStyle = 'rgba(0,0,0,.35)'; x.stroke();
-          x.fillStyle = '#0e0d0b'; x.font = '800 ' + Math.round(r * 1.15) + 'px system-ui,sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
-          x.fillText(String(n), cx, cy + r * 0.05);
-        });
+      shots.filter(sh => sh.rows.length).forEach(sh => {
+        const {c, ox, oy, u} = markShot(sh, true), S = sh.scale;
         // tap a product on the photo: jump to its row in the list
         c.onclick = ev => {
           const rc = c.getBoundingClientRect(), k = c.width / rc.width;
@@ -1762,7 +1833,7 @@
         };
         box.append(c);
       });
-      box.hidden = !shots.length;
+      box.hidden = !shots.some(sh => sh.rows.length);
     };
     const draw = el => {
       drawShots(el);
@@ -1798,6 +1869,13 @@
             saveItem(it); n++;
             prefetch(it.value);
             analyzeLater({id: it.id, prio: 0});
+          }
+          // keep the photos with the folder: the originals, and the ones numbered like the folder
+          if (shots.length) {
+            const first = []; let k = 1;
+            rows.forEach(r => { if (r.code && r.code.length >= 6) { first.push([k, r.qty]); k += r.qty; } else first.push(null); });
+            const label = n => { const f = first[n - 1]; return !f ? String(n) : f[1] > 1 ? f[0] + '–' + (f[0] + f[1] - 1) : String(f[0]); };
+            saveTillPhotos(sid, shots, sh => markShot(sh, false, label).c);
           }
           posFiles = [];
           closeSheet();
@@ -3619,9 +3697,9 @@
     if (openFolder !== null && !getFolder(openFolder)) closeFolderView();
     render();
   }
-  loaded.then(purgeOld);
+  loaded.then(purgeOld).then(() => dropOldTillPhotos());
   setInterval(purgeOld, 60 * 60 * 1000);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden) purgeOld(); });
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) { purgeOld(); dropOldTillPhotos(); } });
   unlockAudio();   // works straight away wherever the browser allows sound without a tap
   loaded.then(() => setTimeout(resumeStudies, 1500));
   // round pictures for barcodes saved before pictures existed (from their saved photo)

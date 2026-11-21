@@ -1213,6 +1213,9 @@
         } else { flush(); }
       }
       flush();
+      if (best && best.d.length >= 14 && best.d.length <= 15) {   // a stray mark read as a digit at an end
+        for (let a = 0; a + 13 <= best.d.length; a++) if (gtinOk(best.d.substr(a, 13))) { best.d = best.d.substr(a, 13); break; }
+      }
       l.code = best ? best.d : '';
       l.codeX = best ? best.x : 0;
       l.codeX1 = best ? best.x1 : 0;
@@ -1566,12 +1569,15 @@
       const runs = (text.match(/\d[\d ]{6,16}\d/g) || []).map(t => t.replace(/\D/g, ''));
       let got = null;
       for (const t of runs) {
-        for (const L of [13, 12, 8]) for (let a = 0; a + L <= t.length && !got; a++) if (isCode(t.substr(a, L)) && (L !== 8 || t.length <= 9)) got = t.substr(a, L);
+        // a long run with a year in it is the header's date and version, not a row
+        if (t.length >= 16 || /20[2-3]\d$|20[2-3]\d\d{0,2}$/.test(t) && t.length > 13) continue;
+        // a code, or a code with one stray digit at an end — not a code found somewhere inside a longer number
+        for (const L of [13, 12, 8]) for (let a = 0; a + L <= t.length && a <= 1 && t.length <= L + 1 && !got; a++) if (isCode(t.substr(a, L))) got = t.substr(a, L);
         if (!got && t.length >= 12) {   // one or two misread digits of a code already on this screen: that product again
           const tw = known.find(k => k.length === t.length && [...k].filter((ch, i) => ch !== t[i]).length <= 3);
           if (tw) got = tw;
         }
-        if (!got && t.length >= 11) { const f = digitsFix(t.length > 13 ? t.slice(-13) : t); if (f && f.sure !== undefined && f.code && isCode(f.code)) got = f.code; }
+        // (no guessing a digit to make the check pass here: a badly read row is better left blank to type in)
         if (got) break;
       }
       return got;

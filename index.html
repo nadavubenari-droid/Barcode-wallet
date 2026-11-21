@@ -402,8 +402,51 @@
   let showId = null, showingPhoto = false;
 
   /* ---------- storage ---------- */
+  // Scans live in the browser's database (IndexedDB), which holds hundreds of MB.
+  // The old small store (localStorage, ~5 MB) filled up with product pictures, so saves were
+  // silently lost on refresh; it now keeps only a slim copy (codes and names) as a backup.
   function lsGet(){ try { return JSON.parse(localStorage.getItem(LS) || '[]') || []; } catch(e){ return []; } }
-  function lsSet(a){ try { localStorage.setItem(LS, JSON.stringify(a)); } catch(e){} }
+  let dbP = null;
+  function dataDB(){
+    if (!dbP) dbP = new Promise((res, rej) => {
+      if (!window.indexedDB) return rej(new Error('no idb'));
+      const rq = indexedDB.open('barcode-wallet-data', 1);
+      rq.onupgradeneeded = () => rq.result.createObjectStore('kv');
+      rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error);
+    });
+    return dbP;
+  }
+  async function idbGet(k){
+    const db = await dataDB();
+    return new Promise((res, rej) => { const rq = db.transaction('kv').objectStore('kv').get(k); rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error); });
+  }
+  async function idbPut(k, v){
+    const db = await dataDB();
+    return new Promise((res, rej) => { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').put(v, k); tx.oncomplete = res; tx.onerror = tx.onabort = () => rej(tx.error); });
+  }
+  // writes are joined: while one is being written, only the newest list waits for its turn
+  let writing = false, nextWrite = null, storeWarned = false;
+  async function writeLoop(){
+    if (writing) return;
+    writing = true;
+    while (nextWrite) {
+      const v = nextWrite; nextWrite = null;
+      try { await idbPut('items', v); }
+      catch(e){ if (!storeWarned) { storeWarned = true; toast('Couldn’t save on this phone — storage is full or blocked'); } }
+    }
+    writing = false;
+  }
+  function lsSet(a){
+    const copy = a.map(x => Object.assign({}, x));
+    nextWrite = copy; writeLoop();
+    // slim backup: everything but the pictures
+    try {
+      const slim = copy.map(x => { const y = Object.assign({}, x); delete y.photo; delete y.pic; delete y.avatar; return y; });
+      localStorage.setItem(LS, JSON.stringify(slim));
+    } catch(e){}
+  }
+  // ask the browser to keep this site's data even when the phone is low on space
+  try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch(e){}
   const newId = () => Date.now().toString(36) + Math.random().toString(36).slice(2,8);
   const sortItems = a => a.sort((x,y) => (y.created||0) - (x.created||0));
   function bodyOf(it){
@@ -426,8 +469,13 @@
       m === 'slow'  ? 'Still connecting…' : 'Connecting…';
   }
 
-  function applyLocal(){
-    items = sortItems(lsGet());
+  async function applyLocal(){
+    let saved = null;
+    try { saved = await idbGet('items'); } catch(e){}
+    if (!Array.isArray(saved)) { saved = lsGet(); if (saved.length) lsSet(saved); }   // first run: move the old store over
+    // anything saved meanwhile (in the first moments) is kept too
+    const ids = new Set(saved.map(x => x.id));
+    items = sortItems(saved.concat(items.filter(x => !ids.has(x.id))));
     items.forEach(i => { if (i._local) pending.set(i.id, i); });
     render();
   }
@@ -3090,7 +3138,7 @@
   }
   let pass = 0, lastBox = null, lastBoxAt = 0;
   const frameBuf = []; let lastBufAt = 0;
-  window.__bwTest = {reviewScreen: (l, n) => reviewScreen(l, n), parseScreen: (w, o) => parseScreen(w, o), completeRows: r => completeRows(r), stitchLists: (a, b) => stitchLists(a, b), locate: locate, straighten: straighten, searchByWords: (w, s, t) => searchByWords(w, s, t), studyState: () => ({segs: videoSegs.length, marks: videoMarks.length, recording: !!rec}), readClues: readClues, similarProducts: similarProducts, barcodeNeighbours: barcodeNeighbours, packageColour: packageColour, aroundBarcode: aroundBarcode};
+  window.__bwTest = {saveItem: it => saveItem(it), count: () => items.length, reviewScreen: (l, n) => reviewScreen(l, n), parseScreen: (w, o) => parseScreen(w, o), completeRows: r => completeRows(r), stitchLists: (a, b) => stitchLists(a, b), locate: locate, straighten: straighten, searchByWords: (w, s, t) => searchByWords(w, s, t), studyState: () => ({segs: videoSegs.length, marks: videoMarks.length, recording: !!rec}), readClues: readClues, similarProducts: similarProducts, barcodeNeighbours: barcodeNeighbours, packageColour: packageColour, aroundBarcode: aroundBarcode};
   async function detectFrame(v){
     pass++;
     let box = null;
@@ -3267,7 +3315,7 @@
     clearTimeout(tt); tt = setTimeout(() => t.classList.remove('on', 'act'), 5000);
   }
 
-  applyLocal();
+  const loaded = applyLocal();
   setMode('local');
 
   /* ---------- auto-delete scan folders older than a week ---------- */
@@ -3283,11 +3331,11 @@
     if (openFolder !== null && !getFolder(openFolder)) closeFolderView();
     render();
   }
-  purgeOld();
+  loaded.then(purgeOld);
   setInterval(purgeOld, 60 * 60 * 1000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) purgeOld(); });
   unlockAudio();   // works straight away wherever the browser allows sound without a tap
-  setTimeout(resumeStudies, 1500);
+  loaded.then(() => setTimeout(resumeStudies, 1500));
   // round pictures for barcodes saved before pictures existed (from their saved photo)
   setTimeout(async () => {
     for (const it of items.filter(x => x.photo && (!x.avatar || !x.pic)).slice(0, 60)) {

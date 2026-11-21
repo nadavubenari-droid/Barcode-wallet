@@ -270,10 +270,16 @@
   /* anything drawn on the white barcode backgrounds stays dark */
   .avatar .nocode,.code-big .nocode,.thumb .nocode,.tile-pic .nocode,.preview .nocode,.slide .nocode{color:#1a1814}
   /* reel mode stays white for the register's scanner */
-  #reel{background:#fff;color:#1a1814}
-  #reel .btn.ghost{color:#1a1814;border-color:#ddd5c6;background:#fff}
-  #reel .reel-name,#reel .fmt{color:#7a7468}
-  .reel-stage .slide.countdown{font:800 min(40vw,220px)/1 system-ui,sans-serif;color:#111;align-items:center;justify-content:center}
+  /* reel: a dark screen, each barcode on a white sticker */
+  #reel{background:#0e0d0b;color:#f2ede4}
+  #reel .btn.ghost{color:#f2ede4;border-color:#3a362f;background:#1a1814}
+  #reel .reel-name,#reel .fmt{color:#a59e90}
+  .reel-stage .slide.blank{background:transparent}
+  .reel-stage .slide.code-big{background:transparent;padding:0}
+  .reel-stage .reel-move{background:#fff;border-radius:16px;padding:16px 14px;box-shadow:0 0 0 1px rgba(255,255,255,.06),0 12px 40px rgba(0,0,0,.55)}
+  .reel-stage .code-big.bar svg{width:min(78vw,540px)}
+  .reel-stage .code-big.qr svg{width:min(70vw,340px)}
+  .reel-stage .slide.countdown{font:800 min(40vw,220px)/1 system-ui,sans-serif;color:#f2ede4;align-items:center;justify-content:center}
   .reel-stage .slide.countdown.on{display:flex}
   .slide.countdown.on{animation:cd-pop 1s ease-out}
   @keyframes cd-pop{0%{transform:scale(.6);opacity:0}25%{transform:scale(1);opacity:1}85%{opacity:1}100%{opacity:.2}}

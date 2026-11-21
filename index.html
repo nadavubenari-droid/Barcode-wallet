@@ -1049,7 +1049,7 @@
      for shops' own short codes, sit in the same column as the others). Each code's name is the
      text on its own line or the nearest line next to it. Headers, totals, dates, phone and
      customer numbers, coupons and discounts are left out. */
-  const POS_SKIP = /סה"?כ|סה״כ|לתשלום|תשלום|תאריך|שעה|קופה|קופאי|סניף|תחנה|טלפון|נייד|לקוח|מועדון|עובד|חשבונית|אסמכתא|קבלה|אשראי|מזומן|עודף|יתרה|נקודות|ת\.?ז|מס['׳]? |total|subtotal|date|time|phone|card|receipt|change|cashier|member|points|vat|מע"?מ/i;
+  const POS_SKIP = /סה"?כ|סה״כ|ח["״׳']?ן\s?אחרונ|לתשלום|תשלום|תאריך|שעה|קופה|קופאי|סניף|תחנה|טלפון|נייד|לקוח|מועדון|עובד|חשבונית|אסמכתא|קבלה|אשראי|מזומן|עודף|יתרה|נקודות|ת\.?ז|מס['׳]? |total|subtotal|date|time|phone|card|receipt|change|cashier|member|points|vat|מע"?מ/i;
   const POS_NOT_PRODUCT = /קופון|הנחה|מבצע|הטבה|discount|coupon|promo|%/i;
   function digitsFix(code){
     // the reader often mixes up a few digit shapes; try changing one digit to make the check digit right
@@ -1115,6 +1115,7 @@
       flush();
       l.code = best ? best.d : '';
       l.codeX = best ? best.x : 0;
+      l.codeX1 = best ? best.x1 : 0;
       // the number runs into the edge of the photo: probably cut off
       l.cut = !!(best && picW && best.x1 > picW * 0.95);
       l.letters = (l.text.replace(/[\d\s.,₪$€%:\-–|/\\()[\]"'״׳*+=~_]/g, '')).length;
@@ -1150,21 +1151,44 @@
     const out = [];
     for (const l of cands) {
       const i = lines.indexOf(l);
-      let name = '';
+      let name = '', nameLine = null;
+      // only the words in the code's own column count — not the till's side buttons or other panels
+      const pad = Math.max(medH * 3, (l.codeX1 - l.codeX) * 0.5);
+      const inCol = n => n.w.filter(w => w.x1 > l.codeX - pad && w.x0 < l.codeX1 + pad);
+      // Hebrew reads right to left: put the words of a mostly-Hebrew line in that order
+      const colText = n => {
+        const ws = inCol(n).slice().sort((p, q) => p.x0 - q.x0);
+        const heb = ws.filter(w => /[\u05d0-\u05ea]/.test(w.text)).length;
+        if (heb > ws.length / 2) ws.reverse();
+        return ws.map(w => w.text).join(' ');
+      };
+      const lettersOf = t => t.replace(/[\d\s.,₪$€%:\-–|/\\()[\]"'״׳*+=~_]/g, '').length;
       // name on the same line…
-      if (l.letters >= 3) name = l.text.replace(l.code, ' ');
+      const own = colText(l).replace(l.code, ' ');
+      if (lettersOf(own) >= 3) { name = own; nameLine = l; }
       // …or the nearest text line just below / above that isn't another code, a total or a coupon
       if (!name) {
-        const near = [lines[i + 1], lines[i - 1]].filter(n => n && !n.code && n.letters >= 3 && !POS_SKIP.test(n.text) && Math.abs(n.cy - l.cy) < medH * 2.2);
-        const below = near.find(n => n.cy > l.cy && !POS_NOT_PRODUCT.test(n.text));
-        const above = near.find(n => n.cy < l.cy && !POS_NOT_PRODUCT.test(n.text));
-        name = (below || above || {text: ''}).text;
+        const near = [lines[i + 1], lines[i - 1]].filter(n => n && !n.code && lettersOf(colText(n)) >= 3 && !POS_SKIP.test(colText(n)) && Math.abs(n.cy - l.cy) < medH * 2.2);
+        const below = near.find(n => n.cy > l.cy && !POS_NOT_PRODUCT.test(colText(n)));
+        const above = near.find(n => n.cy < l.cy && !POS_NOT_PRODUCT.test(colText(n)));
+        nameLine = below || above || null;
+        name = nameLine ? colText(nameLine) : '';
       }
+      // the row: the code's line and its name's line, without anything past the code's far side
+      const rowText = [l, nameLine].filter(Boolean).filter((n, k, a) => a.indexOf(n) === k)
+        .map(n => n.w.filter(w => w.x0 < l.codeX1 + pad).map(w => w.text).join(' ')).join(' ');
       name = name.replace(/[₪$€]\s?\d+[.,]\d{2}|\d+[.,]\d{2}\s?[₪$€]?/g, ' ').replace(/\s{2,}/g, ' ').replace(/^[\s|:\-–]+|[\s|:\-–]+$/g, '').trim();
       name = cleanScreenName(name);
       // quantity (x2, 2 יח', כמות 2, or a quantity column showing 2.0)
-      const qm = /(?:^|\s)(?:x|×)\s?(\d{1,2})\b|\b(\d{1,2})\s?(?:x|×|יח['׳]?)(?:\s|$)|כמות[:\s]*(\d{1,2})|(?:^|\s)(\d{1,2})[.,]0(?=\s|$)/i.exec(l.text + ' ' + name);
-      const qty = qm ? Math.max(1, Math.min(20, +(qm[1] || qm[2] || qm[3] || qm[4]))) : 1;
+      const qm = /(?:^|\s)(?:x|×)\s?(\d{1,2})\b|\b(\d{1,2})\s?(?:x|×|יח['׳]?)(?:\s|$)|כמות[:\s]*(\d{1,2})|(?:^|\s)(\d{1,2})[.,]0(?=\s|$)/i.exec(rowText);
+      let qty = qm ? Math.max(1, Math.min(20, +(qm[1] || qm[2] || qm[3] || qm[4]))) : 1;
+      // a row with a unit price and a total: the total ÷ the price is the quantity
+      // (more reliable than the quantity digit itself, which the reader may confuse — 1.0 read as 4.0)
+      const prices = (rowText.match(/(?:^|\s)\d{1,4}[.,]\d{2}(?=\s|$)/g) || []).map(x => parseFloat(x.trim().replace(',', '.'))).filter(x => x > 0);
+      if (prices.length >= 2) {
+        const lo = Math.min(...prices), hi = Math.max(...prices), q = hi / lo;
+        if (Math.abs(q - Math.round(q)) < 0.02 && q <= 20) qty = Math.round(q);
+      }
       name = name.replace(/(?:^|\s)(?:x|×)\s?\d{1,2}\b|\b\d{1,2}\s?(?:x|×|יח['׳]?)(?=\s|$)|כמות[:\s]*\d{1,2}|(?:^|\s)-?\d{1,4}[.,]\d{1,2}(?=\s|$)/gi, ' ').replace(/\s{2,}/g, ' ').trim();
       const code = l.fix ? l.fix.code : l.code;
       out.push({code: code, format: formatFor(code), name: name.slice(0, 60), qty: qty, sure: !!(l.fix && l.fix.sure), fixed: !!(l.fix && l.fix.fixed), partial: !!l.partial && !(l.fix && l.fix.sure), cut: !!l.cut, y: l.cy});

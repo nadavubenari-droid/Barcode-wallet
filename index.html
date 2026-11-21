@@ -273,6 +273,10 @@
   #reel{background:#fff;color:#1a1814}
   #reel .btn.ghost{color:#1a1814;border-color:#ddd5c6;background:#fff}
   #reel .reel-name,#reel .fmt{color:#7a7468}
+  .reel-stage .slide.countdown{font:800 min(40vw,220px)/1 system-ui,sans-serif;color:#111;align-items:center;justify-content:center}
+  .reel-stage .slide.countdown.on{display:flex}
+  .slide.countdown.on{animation:cd-pop 1s ease-out}
+  @keyframes cd-pop{0%{transform:scale(.6);opacity:0}25%{transform:scale(1);opacity:1}85%{opacity:1}100%{opacity:.2}}
 </style>
 </head>
 <body>
@@ -1492,6 +1496,13 @@
     const stage = $('#reelStage'); stage.textContent = '';
     const seen = new Map();
     reelSlides = [];
+    // a 2-second countdown first, to get the phone in front of the scanner
+    for (const sec of [2, 1]) {
+      const c = document.createElement('div');
+      c.className = 'slide countdown'; c.textContent = sec;
+      stage.append(c);
+      reelSlides.push({el: c, blank: true, count: sec, n: 0, ms: 1000});
+    }
     list.forEach((it, i) => {
       const key = it.format + '|' + it.value;
       const prev = list[i - 1];
@@ -1531,8 +1542,8 @@
     if (reelPaused) while (reelSlides[reelIdx].blank) reelIdx = (reelIdx + (step < 0 ? -1 : 1) + reelSlides.length) % reelSlides.length;
     const s = reelSlides[reelIdx];
     s.el.classList.add('on');
-    $('#reelCount').textContent = s.n + ' / ' + reelTotal;
-    $('#reelName').textContent = s.end ? 'All shown' : s.blank ? '' : (s.it.name || '');
+    $('#reelCount').textContent = s.count ? 'Starting…' : s.n + ' / ' + reelTotal;
+    $('#reelName').textContent = s.count ? 'Get ready' : s.end ? 'All shown' : s.blank ? '' : (s.it.name || '');
     scheduleNext();
   }
   function scheduleNext(){

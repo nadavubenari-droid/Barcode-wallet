@@ -1180,7 +1180,11 @@
         const t = w.text.replace(/[^\d]/g, '');
         // a price (12.90) or quantity (1.0) is not part of a code; stray marks at the ends (729…1!) are ignored
         const core = w.text.replace(/^[!|:;'"`‘’,.\[\](){}]+|[!|:;'"`‘’,.\[\](){}]+$/g, '');
-        if (t && /^[\d\s\-–]+$/.test(core) && (core === w.text || t.length >= 6)) { if (!run.length) runX = w.x0; runX1 = w.x1; run.push(t); } else { flush(); }
+        if (t && /^[\d\s\-–]+$/.test(core) && (core === w.text || t.length >= 6)) {
+          // a wide gap means a different number (another column), not the rest of this one
+          if (run.length && w.x0 - runX1 > Math.max(2, (w.y1 - w.y0)) * 1.6) flush();
+          if (!run.length) runX = w.x0; runX1 = w.x1; run.push(t);
+        } else { flush(); }
       }
       flush();
       l.code = best ? best.d : '';
@@ -1211,6 +1215,17 @@
     // everything else counts only when it lines up with the real barcodes (same column); it is kept
     // but marked, so it can be checked in the review
     cands = cands.filter(l => l.fix || l.partial || (sureXs.length ? sureXs.some(x => Math.abs(x - l.codeX) < colTol) : !couponScreen && cands.length >= 2 && l.code.length <= 10));
+    // a date in the header (11.08.2026 read as 11082026) is not a product
+    cands = cands.filter(l => !/(?:0?[1-9]|[12]\d|3[01])(?:0[1-9]|1[0-2])20\d\d/.test(l.code) || (l.fix && l.fix.sure && l.code.length >= 12 && !/^0?\d{1,2}\d{2}20\d\d$/.test(l.code)));
+    // the barcodes of a till's list stand in one column: a number far from it (prices run together,
+    // 14.90 14.90 1.0 → 1490149010…) is not a product, even if it happens to pass the check
+    const col = cands.filter(l => l.fix && l.fix.sure && l.code.length >= 12);
+    if (col.length >= 3) {
+      const mid = l => (l.codeX + l.codeX1) / 2;
+      const mids = col.map(mid).sort((p, q) => p - q), m = mids[mids.length >> 1];
+      const wid = col.map(l => l.codeX1 - l.codeX).sort((p, q) => p - q)[col.length >> 1];
+      cands = cands.filter(l => Math.abs(mid(l) - m) < Math.max(wid * 0.6, colTol));
+    }
     // a doubtful number a digit or two away from a sure one on the same screen is that same product again
     const sureCodes = cands.filter(l => l.fix && l.fix.sure && !l.cut).map(l => l.fix.code);
     // a number read shifted by a digit (0010510015142 for 6001051001514): a long run of the same
@@ -1283,7 +1298,7 @@
       }
       name = name.replace(/(?:^|\s)(?:x|×)\s?\d{1,2}\b|\b\d{1,2}\s?(?:x|×|יח['׳]?)(?=\s|$)|כמות[:\s]*\d{1,2}|(?:^|\s)-?\d{1,4}[.,]\d{1,2}(?=\s|$)/gi, ' ').replace(/\s{2,}/g, ' ').trim();
       const code = l.fix ? l.fix.code : l.code;
-      out.push({code: code, format: formatFor(code), name: name.slice(0, 60), qty: qty, sure: !!(l.fix && l.fix.sure), fixed: !!(l.fix && l.fix.fixed), partial: !!l.partial && !(l.fix && l.fix.sure), cut: !!l.cut, y: l.cy});
+      out.push({code: code, format: formatFor(code), name: name.slice(0, 60), qty: qty, sure: !!(l.fix && l.fix.sure), fixed: !!(l.fix && l.fix.fixed), partial: !!l.partial && !(l.fix && l.fix.sure), cut: !!l.cut, y: l.cy, x0: l.codeX, x1: l.codeX1});
     }
     // many tills show how many items are on the bill ("פריטים 10"): used to check the count
     const label = ws.find(w => /פריטים|^items?$/i.test(w.text));
@@ -1294,6 +1309,22 @@
       if (num && +num.text > 0) out.tillCount = +num.text;
     }
     return out;
+  }
+  // after joining the two readings: keep only rows in the barcode column (a number found by the
+  // digits-only reading in the header or among the prices is not a product)
+  // a "number" the digits-only reading made out of a line of words (it reads letters as digits)
+  function overWords(d, words){
+    return words.some(w => /[\u05d0-\u05ea]{2,}|[A-Za-z]{3,}/.test(w.text) && w.y0 < d.y && w.y1 > d.y && w.x1 > d.x0 && w.x0 < d.x1);
+  }
+  function inColumn(rows){
+    const col = rows.filter(r => r.sure && r.code.length >= 12 && r.x1 > r.x0);
+    if (col.length < 3) return rows;
+    const mid = r => (r.x0 + r.x1) / 2;
+    const mids = col.map(mid).sort((p, q) => p - q), m = mids[mids.length >> 1];
+    const wid = col.map(r => r.x1 - r.x0).sort((p, q) => p - q)[col.length >> 1];
+    const kept = rows.filter(r => !(r.x1 > r.x0) || Math.abs(mid(r) - m) < wid * 0.6);
+    if (rows.tillCount) kept.tillCount = rows.tillCount;
+    return kept;
   }
   // join the lists from several photos into one, without repeating the rows that two photos share
   function stitchLists(acc, next){
@@ -1387,9 +1418,10 @@
       for (const d of drows.filter(d => d.sure || d.partial)) {
         const near = rows.find(r => Math.abs(r.y - d.y) < 25);
         if (near && !near.sure && (d.sure || d.code.length > near.code.length)) { near.code = d.code; near.format = d.format; near.sure = d.sure; near.partial = d.partial; near.cut = d.cut; }
-        else if (!near && !rows.some(r => r.code === d.code)) rows.push({...d, name: ''});
+        else if (!near && !rows.some(r => r.code === d.code) && !overWords(d, words)) rows.push({...d, name: ''});
       }
       rows.sort((a, b) => a.y - b.y);
+      rows = inColumn(rows);
       const score = rs => rs.filter(r => r.sure).length * 2 + rs.filter(r => r.partial).length;
       if (score(rows) > score(best) || (!best.length && rows.length)) best = rows;
       if (rows.length) ctx.deg = deg;
